@@ -1,6 +1,6 @@
 module github.com/stefanprodan/podinfo
 
-go 1.25
+go 1.24.0
 
 require (
 	github.com/chzyer/readline v1.5.1

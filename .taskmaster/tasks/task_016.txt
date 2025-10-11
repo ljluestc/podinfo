@@ -1,0 +1,11 @@
+# Task ID: 16
+# Title: Implement workload autoscaling (HPA/VPA/Cluster Autoscaler)
+# Status: pending
+# Dependencies: 1, 12
+# Priority: medium
+# Description: Configure horizontal and vertical pod autoscaling with cluster autoscaler
+# Details:
+Configure Horizontal Pod Autoscaler based on CPU, memory, and custom metrics. Deploy Vertical Pod Autoscaler for resource optimization. Implement KEDA for event-driven autoscaling. Configure scale-down stabilization policies to prevent flapping. Deploy cluster autoscaler for automatic node scaling. Set up autoscaling monitoring and metrics dashboards. Configure autoscaling policies and thresholds per workload. Implement cost-aware autoscaling strategies. Document autoscaling configurations and tuning procedures.
+
+# Test Strategy:
+Test HPA scales pods correctly, verify VPA recommendations, validate cluster autoscaler adds/removes nodes, test KEDA event-driven scaling

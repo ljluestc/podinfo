@@ -1,0 +1,80 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.4.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: check-json
+      - id: check-toml
+      - id: check-xml
+      - id: check-case-conflict
+      - id: check-merge-conflict
+      - id: debug-statements
+      - id: detect-private-key
+
+  - repo: https://github.com/golangci/golangci-lint
+    rev: v1.54.2
+    hooks:
+      - id: golangci-lint
+        args: [--timeout=5m, --verbose]
+
+  - repo: https://github.com/psf/black
+    rev: 23.7.0
+    hooks:
+      - id: black
+        language_version: python3
+
+  - repo: https://github.com/pycqa/isort
+    rev: 5.12.0
+    hooks:
+      - id: isort
+        args: [--profile=black]
+
+  - repo: https://github.com/pre-commit/mirrors-eslint
+    rev: v8.45.0
+    hooks:
+      - id: eslint
+        files: \.(js|jsx|ts|tsx)$
+        additional_dependencies:
+          - eslint@8.45.0
+
+  - repo: local
+    hooks:
+      - id: go-test
+        name: Run Go tests
+        entry: bash -c 'cd test && go test -v -timeout=30s ./integration_test.go'
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: go-build
+        name: Build Go application
+        entry: bash -c 'go build -o podinfo.exe .'
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: integration-test
+        name: Run integration tests
+        entry: bash -c 'cd test && ./run_integration_tests.sh'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+
+      - id: security-scan
+        name: Security scan
+        entry: bash -c 'if command -v gosec >/dev/null 2>&1; then gosec ./...; else echo "gosec not installed, skipping security scan"; fi'
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: license-check
+        name: Check license headers
+        entry: bash -c 'find . -name "*.go" -not -path "./vendor/*" -not -path "./.git/*" | xargs grep -L "Copyright" | head -10 | xargs -I {} echo "Missing license header: {}"'
+        language: system
+        pass_filenames: false
+        always_run: true

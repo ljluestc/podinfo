@@ -1,0 +1,26 @@
+# Calico CNI Installation for Network Policies and Zero-Trust Networking
+# Download the latest from: https://raw.githubusercontent.com/projectcalico/calico/v3.26.0/manifests/calico.yaml
+# This is a placeholder - actual installation should use official Calico manifest
+
+# After installation, apply custom configuration:
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: calico-config
+  namespace: kube-system
+data:
+  # Enable IP-in-IP encapsulation
+  ipip_enabled: "true"
+  # Enable VXLAN for cloud environments
+  vxlan_enabled: "true"
+  # BGP configuration
+  bgp_enabled: "true"
+  # Network policy enforcement
+  felix_defaultendpointtohostaction: "ACCEPT"
+  felix_iptablesfilterallowaction: "ACCEPT"
+  felix_iptablesmangleallowaction: "ACCEPT"
+  # Enable flow logs for network visibility
+  felix_flowlogsenabled: "true"
+  # Set policy sync mode
+  felix_policysyncpathprefix: "/var/run/nodeagent"

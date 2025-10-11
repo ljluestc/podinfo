@@ -1,0 +1,11 @@
+# Task ID: 6
+# Title: Configure image security and vulnerability scanning
+# Status: pending
+# Dependencies: 1, 2
+# Priority: high
+# Description: Set up container registry, implement image scanning, signing, and admission controls
+# Details:
+Set up private container registry with integrated vulnerability scanning. Implement image signing and verification using Cosign or Notary. Configure admission controllers to block images with vulnerabilities above threshold. Set up automated image scanning in CI/CD pipeline. Implement image provenance tracking and SBOM generation. Configure image pull policies and secrets management. Set up base image hardening with minimal attack surface. Implement registry access controls and comprehensive audit logging.
+
+# Test Strategy:
+Test image scanning detects vulnerabilities, verify image signing/verification works, validate admission controller blocks vulnerable images, test SBOM generation

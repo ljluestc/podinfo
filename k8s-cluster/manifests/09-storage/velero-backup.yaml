@@ -1,0 +1,95 @@
+---
+# Velero for Backup and Disaster Recovery
+# Install via Helm:
+# helm repo add vmware-tanzu https://vmware-tanzu.github.io/helm-charts
+# helm install velero vmware-tanzu/velero \
+#   --namespace velero \
+#   --create-namespace \
+#   --set configuration.backupStorageLocation[0].name=default \
+#   --set configuration.backupStorageLocation[0].provider=aws \
+#   --set configuration.backupStorageLocation[0].bucket=velero-backups \
+#   --set configuration.volumeSnapshotLocation[0].name=default \
+#   --set configuration.volumeSnapshotLocation[0].provider=aws \
+#   --set initContainers[0].name=velero-plugin-for-aws \
+#   --set initContainers[0].image=velero/velero-plugin-for-aws:v1.8.0 \
+#   --set initContainers[0].volumeMounts[0].mountPath=/target \
+#   --set initContainers[0].volumeMounts[0].name=plugins
+
+# Backup Schedule - Daily full backup
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: daily-backup
+  namespace: velero
+spec:
+  schedule: "0 2 * * *"  # Daily at 2 AM
+  template:
+    includedNamespaces:
+    - "*"
+    excludedNamespaces:
+    - kube-system
+    - kube-public
+    - kube-node-lease
+    includedResources:
+    - "*"
+    snapshotVolumes: true
+    ttl: 720h0m0s  # 30 days retention
+    storageLocation: default
+    volumeSnapshotLocations:
+    - default
+
+---
+# Backup Schedule - Hourly incremental
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: hourly-backup
+  namespace: velero
+spec:
+  schedule: "0 * * * *"  # Every hour
+  template:
+    includedNamespaces:
+    - "production"
+    - "staging"
+    snapshotVolumes: true
+    ttl: 168h0m0s  # 7 days retention
+    storageLocation: default
+
+---
+# Backup for specific application
+apiVersion: velero.io/v1
+kind: Backup
+metadata:
+  name: app-backup
+  namespace: velero
+spec:
+  includedNamespaces:
+  - production
+  labelSelector:
+    matchLabels:
+      app: critical-app
+  snapshotVolumes: true
+  ttl: 2160h0m0s  # 90 days
+  hooks:
+    resources:
+    - name: database-backup-hook
+      includedNamespaces:
+      - production
+      labelSelector:
+        matchLabels:
+          app: database
+      pre:
+      - exec:
+          container: database
+          command:
+          - /bin/sh
+          - -c
+          - "pg_dump -U postgres mydb > /tmp/backup.sql"
+          timeout: 30m
+      post:
+      - exec:
+          container: database
+          command:
+          - /bin/sh
+          - -c
+          - "rm /tmp/backup.sql"

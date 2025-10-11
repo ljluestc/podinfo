@@ -1,0 +1,57 @@
+---
+# Image Policy Configuration
+# Only allow images from trusted registries
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: image-policy
+  namespace: kube-system
+data:
+  policy.yaml: |
+    apiVersion: policy/v1alpha1
+    kind: ImagePolicy
+    spec:
+      # Allow only images from these registries
+      allowedRegistries:
+        - "registry.example.com"
+        - "gcr.io/my-project"
+        - "registry.k8s.io"
+      # Block images with HIGH or CRITICAL vulnerabilities
+      maxCriticalVulnerabilities: 0
+      maxHighVulnerabilities: 0
+      maxMediumVulnerabilities: 5
+      # Require image signing
+      requireImageSignature: true
+      # Trusted signers
+      trustedSigners:
+        - "team-a@example.com"
+        - "team-b@example.com"
+      # SBOM requirements
+      requireSBOM: true
+
+---
+# Cosign for Image Signing and Verification
+# Install policy-controller:
+# kubectl apply -f https://github.com/sigstore/policy-controller/releases/latest/download/policy-controller.yaml
+
+# ClusterImagePolicy for Cosign verification
+apiVersion: policy.sigstore.dev/v1beta1
+kind: ClusterImagePolicy
+metadata:
+  name: require-signed-images
+spec:
+  images:
+  - glob: "registry.example.com/**"
+  - glob: "gcr.io/my-project/**"
+  authorities:
+  - keyless:
+      url: https://fulcio.sigstore.dev
+      identities:
+      - issuer: https://accounts.google.com
+        subject: ".*@example\\.com$"
+  - key:
+      data: |
+        -----BEGIN PUBLIC KEY-----
+        <PUBLIC_KEY_DATA>
+        -----END PUBLIC KEY-----

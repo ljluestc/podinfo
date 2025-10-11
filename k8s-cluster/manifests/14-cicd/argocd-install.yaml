@@ -1,0 +1,200 @@
+---
+# ArgoCD GitOps Platform Installation
+# Install via:
+# kubectl create namespace argocd
+# kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+# ArgoCD Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cm
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: argocd-cm
+    app.kubernetes.io/part-of: argocd
+data:
+  # Enable auto-sync
+  application.instanceLabelKey: argocd.argoproj.io/instance
+
+  # Repository credentials
+  repositories: |
+    - url: https://github.com/example/manifests
+      usernameSecret:
+        name: repo-creds
+        key: username
+      passwordSecret:
+        name: repo-creds
+        key: password
+
+  # Resource customizations
+  resource.customizations: |
+    admissionregistration.k8s.io/MutatingWebhookConfiguration:
+      ignoreDifferences: |
+        jsonPointers:
+        - /webhooks/0/clientConfig/caBundle
+
+  # SSO Configuration (OIDC)
+  oidc.config: |
+    name: Google
+    issuer: https://accounts.google.com
+    clientID: <CLIENT_ID>
+    clientSecret: $oidc.google.clientSecret
+    requestedScopes: ["openid", "profile", "email"]
+
+  # Dex connector (alternative to OIDC)
+  dex.config: |
+    connectors:
+    - type: github
+      id: github
+      name: GitHub
+      config:
+        clientID: <GITHUB_CLIENT_ID>
+        clientSecret: $dex.github.clientSecret
+        orgs:
+        - name: example-org
+
+---
+# RBAC Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-rbac-cm
+  namespace: argocd
+data:
+  policy.default: role:readonly
+  policy.csv: |
+    # Admin role
+    p, role:admin, applications, *, */*, allow
+    p, role:admin, clusters, *, *, allow
+    p, role:admin, repositories, *, *, allow
+    p, role:admin, projects, *, *, allow
+
+    # Developer role
+    p, role:developer, applications, get, */*, allow
+    p, role:developer, applications, sync, */*, allow
+    p, role:developer, applications, override, */*, allow
+    p, role:developer, repositories, get, *, allow
+
+    # Viewer role
+    p, role:viewer, applications, get, */*, allow
+    p, role:viewer, repositories, get, *, allow
+
+    # Group mappings
+    g, admin@example.com, role:admin
+    g, devs, role:developer
+    g, everyone, role:viewer
+
+---
+# Example Application - Production
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: production-app
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/example/k8s-manifests
+    targetRevision: main
+    path: production
+    helm:
+      valueFiles:
+      - values-production.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: production
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+    - CreateNamespace=true
+    - PruneLast=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+---
+# AppProject for multi-tenancy
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: production-project
+  namespace: argocd
+spec:
+  description: Production environment applications
+  sourceRepos:
+  - 'https://github.com/example/*'
+  destinations:
+  - namespace: 'production*'
+    server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+  - group: ''
+    kind: Namespace
+  namespaceResourceBlacklist:
+  - group: ''
+    kind: ResourceQuota
+  - group: ''
+    kind: LimitRange
+  orphanedResources:
+    warn: true
+
+---
+# Argo Rollouts for Progressive Delivery
+# Install via:
+# kubectl create namespace argo-rollouts
+# kubectl apply -n argo-rollouts -f https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml
+
+# Example Rollout with Canary
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: app-rollout
+  namespace: production
+spec:
+  replicas: 5
+  strategy:
+    canary:
+      steps:
+      - setWeight: 20
+      - pause: {duration: 5m}
+      - setWeight: 40
+      - pause: {duration: 5m}
+      - setWeight: 60
+      - pause: {duration: 5m}
+      - setWeight: 80
+      - pause: {duration: 5m}
+      canaryService: app-canary
+      stableService: app-stable
+      trafficRouting:
+        istio:
+          virtualService:
+            name: app-virtual-service
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: myapp
+  template:
+    metadata:
+      labels:
+        app: myapp
+    spec:
+      containers:
+      - name: app
+        image: registry.example.com/myapp:v1.0.0
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"

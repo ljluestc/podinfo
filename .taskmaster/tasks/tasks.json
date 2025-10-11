@@ -1,0 +1,472 @@
+{
+  "master": {
+    "tasks": [
+      {
+        "id": 1,
+        "title": "Set up base cluster infrastructure and architecture",
+        "description": "Deploy highly available Kubernetes cluster with HA control plane, etcd cluster, and worker node pools",
+        "status": "pending",
+        "priority": "critical",
+        "dependencies": [],
+        "details": "Deploy multi-node Kubernetes cluster with minimum 3 master nodes for HA control plane. Configure etcd cluster with TLS encryption and automatic backups. Set up API server with audit logging, configure scheduler with custom policies, deploy controller manager with leader election. Provision worker node pools with auto-scaling, configure node taints/labels for workload isolation. Implement node monitoring, health checks, and lifecycle management.",
+        "testStrategy": "Verify cluster components are healthy, test HA failover scenarios, validate etcd backups, confirm node auto-scaling works, test node lifecycle operations",
+        "subtasks": []
+      },
+      {
+        "id": 2,
+        "title": "Implement comprehensive authentication and authorization",
+        "description": "Configure OIDC integration, implement RBAC with least privilege, and set up audit logging",
+        "status": "pending",
+        "priority": "critical",
+        "dependencies": [
+          "1"
+        ],
+        "details": "Configure OIDC integration for user authentication. Set up service account token management with short-lived tokens. Implement RBAC with least privilege principle across all namespaces. Create custom roles and cluster roles for different personas (admin, developer, viewer). Configure role bindings and cluster role bindings. Set up comprehensive audit logging for all API access. Implement webhook authentication for external systems. Configure admission webhooks for policy enforcement.",
+        "testStrategy": "Test OIDC login flow, verify RBAC permissions work correctly, validate audit logs capture all actions, test webhook authentication, verify least privilege access",
+        "subtasks": []
+      },
+      {
+        "id": 3,
+        "title": "Configure pod security and workload hardening",
+        "description": "Implement Pod Security Standards, Security Contexts, and capability restrictions",
+        "status": "pending",
+        "priority": "critical",
+        "dependencies": [
+          "1",
+          "2"
+        ],
+        "details": "Implement Pod Security Standards (restricted, baseline, privileged) across namespaces. Configure Security Contexts for all workloads with appropriate restrictions. Set up AppArmor or SELinux profiles for enhanced isolation. Implement seccomp profiles for system call filtering. Configure read-only root filesystems where applicable. Drop unnecessary Linux capabilities from containers. Enforce non-root user execution for all pods. Implement comprehensive resource limits and quotas.",
+        "testStrategy": "Verify Pod Security Standards are enforced, test Security Context restrictions, validate AppArmor/SELinux profiles, confirm seccomp profiles work, test capability restrictions",
+        "subtasks": []
+      },
+      {
+        "id": 4,
+        "title": "Deploy secrets management and encryption infrastructure",
+        "description": "Integrate external secrets management, implement secrets rotation, and encrypt secrets at rest",
+        "status": "pending",
+        "priority": "critical",
+        "dependencies": [
+          "1",
+          "2"
+        ],
+        "details": "Deploy External Secrets Operator or Sealed Secrets for secrets management. Integrate with HashiCorp Vault or cloud KMS for secure secret storage. Implement automated secrets rotation policies. Configure secrets encryption at rest in etcd. Set up RBAC for secrets access with least privilege. Implement secrets scanning in CI/CD pipeline. Configure audit logging for all secrets access. Document secrets management procedures and runbooks.",
+        "testStrategy": "Test external secrets sync, verify secrets encryption at rest, validate rotation policies work, test RBAC for secrets access, verify secrets scanning catches issues",
+        "subtasks": []
+      },
+      {
+        "id": 5,
+        "title": "Implement network security and policies",
+        "description": "Deploy CNI with NetworkPolicies, configure zero-trust networking, and implement network segmentation",
+        "status": "pending",
+        "priority": "critical",
+        "dependencies": [
+          "1"
+        ],
+        "details": "Deploy CNI plugin (Calico or Cilium) with NetworkPolicy support. Configure pod networking with custom CIDR ranges. Implement default deny-all NetworkPolicies for all namespaces. Create namespace-specific network policies with explicit ingress and egress rules. Configure network segmentation for multi-tenancy. Set up BGP routing for advanced networking scenarios. Implement network policy testing and validation framework. Document network policy architecture and templates.",
+        "testStrategy": "Verify NetworkPolicies block unauthorized traffic, test ingress/egress rules, validate network isolation between namespaces, test BGP routing",
+        "subtasks": []
+      },
+      {
+        "id": 6,
+        "title": "Configure image security and vulnerability scanning",
+        "description": "Set up container registry, implement image scanning, signing, and admission controls",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": [
+          "1",
+          "2"
+        ],
+        "details": "Set up private container registry with integrated vulnerability scanning. Implement image signing and verification using Cosign or Notary. Configure admission controllers to block images with vulnerabilities above threshold. Set up automated image scanning in CI/CD pipeline. Implement image provenance tracking and SBOM generation. Configure image pull policies and secrets management. Set up base image hardening with minimal attack surface. Implement registry access controls and comprehensive audit logging.",
+        "testStrategy": "Test image scanning detects vulnerabilities, verify image signing/verification works, validate admission controller blocks vulnerable images, test SBOM generation",
+        "subtasks": []
+      },
+      {
+        "id": 7,
+        "title": "Deploy policy enforcement with OPA Gatekeeper",
+        "description": "Implement OPA Gatekeeper, create constraint templates, and configure policy enforcement",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": [
+          "1",
+          "2",
+          "3"
+        ],
+        "details": "Deploy OPA Gatekeeper for automated policy enforcement. Create comprehensive constraint templates for security policies including pod security, resource limits, required labels, allowed container registries, and organizational compliance requirements. Configure policy violations to block non-compliant resources. Set up policy testing framework with automated tests. Implement compliance scanning for CIS Benchmark, PCI-DSS, and other standards. Create custom policies for organization-specific requirements. Set up policy violations reporting and alerting. Document all policies with rationale and remediation steps.",
+        "testStrategy": "Test policies block non-compliant resources, verify constraint templates work correctly, validate compliance scanning, test policy updates",
+        "subtasks": []
+      },
+      {
+        "id": 8,
+        "title": "Implement runtime security monitoring",
+        "description": "Deploy Falco for runtime threat detection and configure security monitoring",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": [
+          "1",
+          "2"
+        ],
+        "details": "Deploy Falco for runtime threat detection and anomaly detection. Configure comprehensive runtime security rules for container behavior monitoring. Set up alerts for suspicious activities and security violations. Implement container behavior baseline profiling. Configure security event logging and SIEM integration. Implement automated incident response procedures. Set up security dashboards and reporting. Configure anomaly detection for workload behavior. Document incident response procedures and runbooks.",
+        "testStrategy": "Test Falco detects security violations, verify alerts are triggered correctly, validate SIEM integration, test incident response procedures",
+        "subtasks": []
+      },
+      {
+        "id": 9,
+        "title": "Configure storage infrastructure and volume management",
+        "description": "Set up storage classes, persistent volumes, snapshots, and backup procedures",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": [
+          "1"
+        ],
+        "details": "Configure multiple storage classes for different performance needs (fast SSD, standard, archive). Set up dynamic provisioning with CSI drivers. Implement volume snapshots with automated scheduling. Configure volume encryption at rest. Set up volume backup and disaster recovery procedures. Implement volume cloning capabilities. Configure volume monitoring and performance tracking. Set up volume access modes and retention policies. Document storage management procedures and troubleshooting guides.",
+        "testStrategy": "Test dynamic volume provisioning, verify snapshots work correctly, validate volume encryption, test backup and restore procedures, validate volume performance",
+        "subtasks": []
+      },
+      {
+        "id": 10,
+        "title": "Deploy and configure ingress controllers",
+        "description": "Set up ingress controller with TLS termination, cert-manager, and load balancing",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": [
+          "1",
+          "5"
+        ],
+        "details": "Deploy ingress controller (NGINX Ingress or similar). Configure TLS termination with automatic certificate management. Deploy cert-manager for automated certificate provisioning and renewal. Implement ingress rate limiting and DDoS protection. Configure ingress authentication and authorization. Set up high availability for ingress controllers. Implement custom error pages and URL redirects. Configure ingress monitoring, logging, and metrics collection. Document ingress configuration and troubleshooting procedures.",
+        "testStrategy": "Test TLS termination works, verify certificate auto-renewal, validate rate limiting, test HA failover, verify custom error pages",
+        "subtasks": []
+      },
+      {
+        "id": 11,
+        "title": "Deploy service mesh for advanced traffic management",
+        "description": "Implement Istio or Linkerd with mTLS, traffic routing, and observability",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": [
+          "1",
+          "5",
+          "10"
+        ],
+        "details": "Deploy Istio or Linkerd service mesh. Configure automatic sidecar injection for all application namespaces. Implement mTLS for all service-to-service communication with automatic certificate rotation. Set up advanced traffic management rules (routing, splitting, mirroring). Configure circuit breakers, retry policies, and timeouts. Implement distributed tracing integration. Set up service mesh observability with metrics and dashboards. Configure security policies in service mesh layer. Document service mesh architecture and operational procedures.",
+        "testStrategy": "Verify mTLS is working between services, test traffic routing rules, validate circuit breakers, test distributed tracing, verify service mesh metrics",
+        "subtasks": []
+      },
+      {
+        "id": 12,
+        "title": "Implement comprehensive observability stack",
+        "description": "Deploy Prometheus, Grafana, and logging infrastructure for full observability",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": [
+          "1"
+        ],
+        "details": "Deploy Prometheus for metrics collection with service discovery. Set up metrics federation for large-scale deployments. Deploy Grafana for visualization with comprehensive dashboards. Implement EFK stack (Elasticsearch, Fluentd, Kibana) or Loki for log aggregation. Configure log parsing, enrichment, and retention policies. Set up distributed tracing with Jaeger or Zipkin. Implement custom metrics and application instrumentation. Configure metrics and log backup procedures. Set up observability access controls and RBAC.",
+        "testStrategy": "Verify metrics collection works, test Grafana dashboards, validate log aggregation, test distributed tracing, verify retention policies",
+        "subtasks": []
+      },
+      {
+        "id": 13,
+        "title": "Configure alerting and incident management",
+        "description": "Set up Alertmanager, define alert rules, and configure notification channels",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": [
+          "12"
+        ],
+        "details": "Deploy and configure Alertmanager for alert routing and management. Define comprehensive alert rules for critical system conditions. Implement alert grouping, deduplication, and correlation. Configure notification channels (Slack, PagerDuty, email, webhooks). Set up on-call schedules and escalation policies. Create runbooks for common alerts and incidents. Implement alert silencing and inhibition rules. Configure SLO-based alerting. Document alerting architecture and incident response procedures.",
+        "testStrategy": "Test alert rules trigger correctly, verify notification delivery, validate alert grouping, test escalation policies, verify runbooks are accurate",
+        "subtasks": []
+      },
+      {
+        "id": 14,
+        "title": "Implement CI/CD pipeline with GitOps",
+        "description": "Deploy ArgoCD or Flux, configure automated deployments, and implement progressive delivery",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": [
+          "1",
+          "2",
+          "6"
+        ],
+        "details": "Deploy GitOps operator (ArgoCD or Flux CD). Configure Git repositories as single source of truth. Implement automated deployment from Git with branch-based environments. Set up deployment approvals and gates. Configure automated rollback on failures. Implement progressive delivery with canary and blue-green deployments using Flagger or Argo Rollouts. Set up deployment notifications and status reporting. Configure drift detection and automated remediation. Implement multi-cluster GitOps management. Document CI/CD workflows and procedures.",
+        "testStrategy": "Test automated deployments work, verify rollback procedures, validate progressive delivery, test drift detection, verify multi-environment deployments",
+        "subtasks": []
+      },
+      {
+        "id": 15,
+        "title": "Configure container build and security scanning pipeline",
+        "description": "Set up automated builds, image scanning, and security gates in CI pipeline",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": [
+          "6",
+          "14"
+        ],
+        "details": "Implement automated container image builds with multi-stage optimization. Configure image tagging and versioning strategies. Set up build caching for performance. Integrate Trivy, Snyk, or Aqua for vulnerability scanning in CI pipeline. Configure severity thresholds and blocking for critical vulnerabilities. Implement SBOM generation and image provenance tracking. Set up compliance scanning for regulatory requirements. Configure scan result reporting and remediation workflows. Document build procedures and security standards.",
+        "testStrategy": "Test automated builds complete successfully, verify vulnerability scanning blocks bad images, validate SBOM generation, test compliance scanning",
+        "subtasks": []
+      },
+      {
+        "id": 16,
+        "title": "Implement workload autoscaling (HPA/VPA/Cluster Autoscaler)",
+        "description": "Configure horizontal and vertical pod autoscaling with cluster autoscaler",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [
+          "1",
+          "12"
+        ],
+        "details": "Configure Horizontal Pod Autoscaler based on CPU, memory, and custom metrics. Deploy Vertical Pod Autoscaler for resource optimization. Implement KEDA for event-driven autoscaling. Configure scale-down stabilization policies to prevent flapping. Deploy cluster autoscaler for automatic node scaling. Set up autoscaling monitoring and metrics dashboards. Configure autoscaling policies and thresholds per workload. Implement cost-aware autoscaling strategies. Document autoscaling configurations and tuning procedures.",
+        "testStrategy": "Test HPA scales pods correctly, verify VPA recommendations, validate cluster autoscaler adds/removes nodes, test KEDA event-driven scaling",
+        "subtasks": []
+      },
+      {
+        "id": 17,
+        "title": "Configure workload management (Deployments, StatefulSets, DaemonSets, Jobs)",
+        "description": "Set up deployment strategies, StatefulSets for stateful apps, and batch job management",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [
+          "1",
+          "9"
+        ],
+        "details": "Implement rolling update strategies with proper health checks and readiness probes. Configure blue-green and canary deployment capabilities. Set up StatefulSets for stateful applications with persistent volume claims. Deploy DaemonSets for node-level services with proper resource limits. Configure CronJobs for scheduled tasks with cleanup policies. Implement pod disruption budgets for high availability. Set up priority classes for workload scheduling. Configure resource quotas and limit ranges. Document workload management best practices and procedures.",
+        "testStrategy": "Test rolling updates work correctly, verify StatefulSet deployments, validate DaemonSet updates, test CronJob execution, verify PDBs prevent disruptions",
+        "subtasks": []
+      },
+      {
+        "id": 18,
+        "title": "Implement backup and disaster recovery procedures",
+        "description": "Deploy Velero, configure automated backups, and test disaster recovery",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": [
+          "1",
+          "9"
+        ],
+        "details": "Deploy Velero for cluster and application backup. Configure automated backup schedules with retention policies. Set up backup to multiple locations (on-site and off-site). Implement application-consistent backups with hooks. Configure disaster recovery procedures with documented RTO/RPO targets. Set up automated backup validation and testing. Implement backup monitoring and alerting. Conduct regular disaster recovery drills. Document backup and restore procedures with step-by-step runbooks.",
+        "testStrategy": "Test backup creation succeeds, verify backup restoration works, validate application-consistent backups, test disaster recovery procedures, verify RTO/RPO targets",
+        "subtasks": []
+      },
+      {
+        "id": 19,
+        "title": "Configure DNS and service discovery",
+        "description": "Set up CoreDNS customization, external DNS, and service discovery mechanisms",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [
+          "1",
+          "5"
+        ],
+        "details": "Configure CoreDNS with custom zones and upstream resolvers. Implement DNS caching and performance tuning. Deploy External DNS for automatic DNS record creation. Configure service discovery mechanisms for service-to-service communication. Set up split-horizon DNS for internal/external access. Implement DNS monitoring and troubleshooting tools. Configure DNS-based load balancing. Document DNS architecture and troubleshooting procedures.",
+        "testStrategy": "Test DNS resolution works correctly, verify external DNS creates records, validate service discovery, test split-horizon DNS",
+        "subtasks": []
+      },
+      {
+        "id": 20,
+        "title": "Implement multi-tenancy and namespace isolation",
+        "description": "Design namespace strategy, configure resource quotas, and implement tenant isolation",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [
+          "1",
+          "2",
+          "5"
+        ],
+        "details": "Design comprehensive namespace hierarchy for teams and applications. Configure resource quotas for all namespaces. Implement namespace-scoped network policies for isolation. Set up namespace-specific RBAC with least privilege. Configure limit ranges for default resource constraints. Implement monitoring and cost tracking per namespace. Set up namespace lifecycle management and provisioning automation. Document multi-tenancy architecture and namespace management procedures.",
+        "testStrategy": "Verify namespace isolation works, test resource quotas enforce limits, validate network isolation between namespaces, test RBAC per namespace",
+        "subtasks": []
+      },
+      {
+        "id": 21,
+        "title": "Deploy custom resource definitions and operators",
+        "description": "Create CRDs for custom needs and deploy operators for complex applications",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [
+          "1",
+          "2"
+        ],
+        "details": "Create Custom Resource Definitions (CRDs) for application-specific needs. Implement CRD validation, defaulting, and conversion webhooks. Set up CRD versioning strategy. Deploy operators for complex applications (databases, message queues, caching). Implement operator lifecycle management with OLM. Configure operator monitoring and alerting. Set up operator backup and recovery procedures. Document CRD specifications and operator usage guides.",
+        "testStrategy": "Test CRD validation works, verify operator lifecycle operations, validate operator reconciliation, test operator upgrades, verify backup/restore",
+        "subtasks": []
+      },
+      {
+        "id": 22,
+        "title": "Implement admission controllers and webhooks",
+        "description": "Deploy validating and mutating webhooks for policy enforcement and auto-configuration",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [
+          "1",
+          "2",
+          "7"
+        ],
+        "details": "Deploy validating webhooks for policy enforcement and compliance checking. Implement mutating webhooks for automatic configuration injection (sidecars, labels, annotations). Configure admission controller high availability. Set up webhook TLS certificate management. Implement webhook testing and validation framework. Configure webhook bypass procedures for emergencies. Set up webhook monitoring and performance metrics. Document webhook architecture and debugging procedures.",
+        "testStrategy": "Test validating webhooks block invalid resources, verify mutating webhooks inject configuration, validate webhook HA, test webhook performance",
+        "subtasks": []
+      },
+      {
+        "id": 23,
+        "title": "Configure configuration management with Helm and Kustomize",
+        "description": "Create Helm charts and Kustomize overlays for environment management",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [
+          "1",
+          "14"
+        ],
+        "details": "Create Helm charts for all applications with proper templating. Implement chart versioning and repository management. Configure values files for different environments. Set up Helm chart testing and validation. Implement Kustomize base and overlay structure for environment-specific configurations. Configure automated ConfigMap and Secret updates. Set up configuration validation and testing. Document Helm and Kustomize usage patterns and best practices.",
+        "testStrategy": "Test Helm chart installations work, verify Kustomize overlays apply correctly, validate environment-specific configs, test chart upgrades",
+        "subtasks": []
+      },
+      {
+        "id": 24,
+        "title": "Implement cost management and optimization",
+        "description": "Deploy cost visibility tools and implement optimization strategies",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [
+          "1",
+          "12"
+        ],
+        "details": "Deploy Kubecost or OpenCost for cluster cost visibility. Set up cost allocation by namespace, team, and application. Implement cost optimization recommendations and automation. Configure cost alerts and budget enforcement. Set up showback/chargeback reporting for teams. Implement resource right-sizing recommendations. Configure idle resource detection and cleanup. Create cost optimization dashboards and reports. Document cost management procedures and policies.",
+        "testStrategy": "Verify cost tracking works, test cost allocation accuracy, validate optimization recommendations, test budget alerts, verify showback reports",
+        "subtasks": []
+      },
+      {
+        "id": 25,
+        "title": "Implement cluster operations automation",
+        "description": "Automate cluster upgrades, node management, and capacity planning",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [
+          "1",
+          "12",
+          "18"
+        ],
+        "details": "Implement automated cluster upgrade procedures with rollback capability. Configure node provisioning and decommissioning automation. Set up node cordon and drain automation for maintenance. Implement automated node repair and replacement. Configure capacity monitoring and forecasting. Set up maintenance window scheduling and automation. Implement cluster health checks and automated diagnostics. Create operational runbooks and automation scripts. Document cluster operations procedures and best practices.",
+        "testStrategy": "Test cluster upgrade procedures, verify node automation works, validate capacity planning alerts, test automated maintenance, verify runbooks",
+        "subtasks": []
+      },
+      {
+        "id": 26,
+        "title": "Implement compliance and governance framework",
+        "description": "Configure CIS benchmark compliance, audit logging, and policy governance",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": [
+          "1",
+          "2",
+          "3",
+          "7"
+        ],
+        "details": "Implement CIS Kubernetes Benchmark controls across the cluster. Configure automated compliance scanning with kube-bench. Set up comprehensive API audit logging with analysis. Implement audit log retention and archival policies. Configure compliance reporting dashboards. Set up policy governance framework with automated enforcement. Implement data classification and encryption policies. Configure compliance monitoring and alerting. Document compliance procedures and control mappings. Conduct regular compliance audits and generate reports.",
+        "testStrategy": "Verify CIS benchmark compliance, test audit logging captures all actions, validate compliance scanning, test policy enforcement, verify compliance reports",
+        "subtasks": []
+      },
+      {
+        "id": 27,
+        "title": "Implement comprehensive testing framework",
+        "description": "Set up cluster conformance, chaos engineering, and continuous validation",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [
+          "1",
+          "12",
+          "13"
+        ],
+        "details": "Implement automated cluster conformance testing with Sonobuoy. Set up chaos engineering tests with Chaos Mesh or Litmus. Configure load testing and performance benchmarking. Implement security testing with kube-bench and kube-hunter. Set up disaster recovery testing automation. Configure application integration and smoke tests. Implement continuous validation of configurations and policies. Set up automated regression testing. Document testing standards, procedures, and schedules.",
+        "testStrategy": "Test conformance tests pass, verify chaos tests don't break cluster, validate load testing results, test security scanning, verify automated tests run correctly",
+        "subtasks": []
+      },
+      {
+        "id": 28,
+        "title": "Create comprehensive documentation and training materials",
+        "description": "Document architecture, create runbooks, and develop training programs",
+        "status": "pending",
+        "priority": "medium",
+        "dependencies": [
+          "1",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "7",
+          "8",
+          "9",
+          "10",
+          "11",
+          "12",
+          "13",
+          "14",
+          "15",
+          "18",
+          "26"
+        ],
+        "details": "Create comprehensive architecture documentation with diagrams. Document all cluster components and their interactions. Create operational runbooks for common procedures. Develop troubleshooting guides and decision trees. Document incident response procedures. Create API documentation for custom resources. Develop onboarding materials for new team members. Create training programs for Kubernetes basics, security best practices, CI/CD workflows, and troubleshooting. Set up hands-on labs and exercises. Implement documentation version control and review process. Create quick reference guides and cheat sheets.",
+        "testStrategy": "Verify documentation is comprehensive and accurate, test runbooks by following them, validate training materials with team, ensure onboarding guides are effective",
+        "subtasks": []
+      },
+      {
+        "id": 29,
+        "title": "Conduct production readiness review and hardening",
+        "description": "Validate all security controls, HA configuration, and operational readiness",
+        "status": "pending",
+        "priority": "critical",
+        "dependencies": [
+          "1",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "7",
+          "8",
+          "9",
+          "10",
+          "11",
+          "12",
+          "13",
+          "14",
+          "15",
+          "16",
+          "17",
+          "18",
+          "19",
+          "20",
+          "21",
+          "22",
+          "23",
+          "24",
+          "25",
+          "26",
+          "27",
+          "28"
+        ],
+        "details": "Conduct comprehensive production readiness review of entire cluster. Validate all security controls are enabled and functioning. Verify high availability configuration across all components. Test disaster recovery procedures end-to-end. Validate monitoring and alerting is comprehensive. Verify backup and restore procedures work. Test incident response procedures. Conduct security penetration testing. Validate compliance with all policies and standards. Review and update all documentation. Conduct team readiness assessment and training validation. Create final production checklist and sign-off procedures.",
+        "testStrategy": "Complete production readiness checklist, verify all tests pass, validate security audit results, confirm DR tests successful, verify team training complete",
+        "subtasks": []
+      },
+      {
+        "id": 30,
+        "title": "Measure and validate success metrics and KPIs",
+        "description": "Validate cluster meets all availability, security, operational, and performance targets",
+        "status": "pending",
+        "priority": "high",
+        "dependencies": [
+          "29"
+        ],
+        "details": "Validate cluster uptime meets 99.9% SLA target. Verify application availability targets are met. Measure and validate API server response times. Confirm CIS benchmark score is 100%. Verify zero critical vulnerabilities exist. Validate security patching SLA is met. Measure deployment frequency and success rate. Validate mean time to recovery targets. Confirm resource utilization is in target range. Validate cost per application is tracked and optimized. Verify policy compliance is 100%. Confirm audit log completeness. Validate documentation coverage is complete. Verify team training is completed. Generate final metrics and KPI report.",
+        "testStrategy": "Measure all KPIs against targets, generate metrics reports, validate SLAs are met, create final project assessment report",
+        "subtasks": []
+      }
+    ],
+    "metadata": {
+      "created": "2025-10-09T15:51:01.827Z",
+      "updated": "2025-10-09T15:51:01.831Z",
+      "description": "Tasks for master context"
+    }
+  }
+}

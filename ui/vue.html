@@ -45,6 +45,70 @@
               Ping
             </v-btn>
 
+            <!-- Long-running Operations Section -->
+            <v-card class="mt-5" dark style="max-width: 600px; width: 100%;">
+              <v-card-title class="text-center">
+                <v-icon left>work</v-icon>
+                Long-running Operations
+              </v-card-title>
+              <v-card-text>
+                <v-layout column align-center>
+                  <v-btn
+                    class="orange darken-2 mb-3"
+                    dark
+                    large
+                    :loading="isDelayRunning"
+                    :disabled="isDelayRunning"
+                    @click="startDelay(10)"
+                  >
+                    <v-icon left>timer</v-icon>
+                    Start 10s Delay Job
+                  </v-btn>
+                  
+                  <v-btn
+                    class="green darken-2 mb-3"
+                    dark
+                    large
+                    :loading="isDelayRunning"
+                    :disabled="isDelayRunning"
+                    @click="startDelay(30)"
+                  >
+                    <v-icon left>timer</v-icon>
+                    Start 30s Delay Job
+                  </v-btn>
+
+                  <v-btn
+                    v-if="currentJobId && isDelayRunning"
+                    class="red darken-2 mb-3"
+                    dark
+                    large
+                    @click="cancelJob()"
+                  >
+                    <v-icon left>cancel</v-icon>
+                    Cancel Job
+                  </v-btn>
+
+                  <v-progress-linear
+                    v-if="isDelayRunning"
+                    :value="delayProgress"
+                    color="orange"
+                    height="6"
+                    class="mb-3"
+                    style="width: 100%;"
+                  ></v-progress-linear>
+
+                  <div v-if="jobStatus" class="text-center">
+                    <v-chip :color="getStatusColor(jobStatus)" dark>
+                      ${ jobStatus }
+                    </v-chip>
+                    <div class="mt-2 text-caption">
+                      Job ID: ${ currentJobId }
+                    </div>
+                  </div>
+                </v-layout>
+              </v-card-text>
+            </v-card>
+
             <template>
               <v-timeline>
                 <v-timeline-item :color="tlColor1"><h3>${ tlName1 }</h3></v-timeline-item>
@@ -92,11 +156,27 @@
         cuddleStyle: {
             backgroundColor: '#34577c'
         },
+        // Job-related data
+        isDelayRunning: false,
+        currentJobId: null,
+        jobStatus: '',
+        delayProgress: 0,
+        delayStartTime: null,
+        delayDuration: 0,
+        progressTimer: null,
     }
     },
     created: function() {
         this.getInfo();
         this.timer = setInterval(this.getInfo, 3000)
+    },
+    beforeDestroy: function() {
+        if (this.timer) {
+            clearInterval(this.timer);
+        }
+        if (this.progressTimer) {
+            clearInterval(this.progressTimer);
+        }
     },
     methods: {
         getInfo: function() {
@@ -157,6 +237,73 @@
             .catch(function (error) {
                 console.log('Request failed', error);
             });
+        },
+        startDelay: function(seconds) {
+            var self = this;
+            self.isDelayRunning = true;
+            self.delayDuration = seconds;
+            self.delayStartTime = Date.now();
+            self.delayProgress = 0;
+            self.jobStatus = 'starting';
+            
+            // Start progress tracking
+            self.progressTimer = setInterval(function() {
+                if (self.isDelayRunning) {
+                    var elapsed = (Date.now() - self.delayStartTime) / 1000;
+                    self.delayProgress = Math.min((elapsed / seconds) * 100, 100);
+                }
+            }, 100);
+
+            fetch(`delay/${seconds}`)
+                .then(function(response) {
+                    return response.json();
+                })
+                .then(function(data) {
+                    self.isDelayRunning = false;
+                    self.currentJobId = data.job_id;
+                    self.jobStatus = data.status;
+                    self.delayProgress = 100;
+                    clearInterval(self.progressTimer);
+                    console.log('Delay job completed:', data);
+                })
+                .catch(function(error) {
+                    self.isDelayRunning = false;
+                    self.jobStatus = 'error';
+                    clearInterval(self.progressTimer);
+                    console.log('Delay job failed:', error);
+                });
+        },
+        cancelJob: function() {
+            var self = this;
+            if (!self.currentJobId) return;
+            
+            fetch(`jobs/${self.currentJobId}/cancel`, {
+                method: 'POST',
+                headers: {
+                    "Content-type": "application/json; charset=UTF-8",
+                }
+            })
+            .then(function(response) {
+                return response.json();
+            })
+            .then(function(data) {
+                self.isDelayRunning = false;
+                self.jobStatus = data.status;
+                clearInterval(self.progressTimer);
+                console.log('Job cancelled:', data);
+            })
+            .catch(function(error) {
+                console.log('Cancel job failed:', error);
+            });
+        },
+        getStatusColor: function(status) {
+            switch(status) {
+                case 'running': return 'orange';
+                case 'completed': return 'green';
+                case 'cancelled': return 'red';
+                case 'error': return 'red';
+                default: return 'grey';
+            }
         }
     }
   })

@@ -1,0 +1,47 @@
+---
+# Trivy Operator for Image Vulnerability Scanning
+# Install via Helm:
+# helm repo add aqua https://aquasecurity.github.io/helm-charts/
+# helm install trivy-operator aqua/trivy-operator \
+#   --namespace trivy-system \
+#   --create-namespace \
+#   --set="trivy.ignoreUnfixed=true"
+
+# Image Scanning Policy
+apiVersion: aquasecurity.github.io/v1alpha1
+kind: ConfigAuditReport
+metadata:
+  name: image-scan-policy
+  namespace: trivy-system
+spec:
+  scanner:
+    name: Trivy
+    vendor: Aqua Security
+    version: "0.45.0"
+
+---
+# Admission Controller to block vulnerable images
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: trivy-admission-webhook
+webhooks:
+- name: scanning.trivy.aquasecurity.github.io
+  admissionReviewVersions: ["v1", "v1beta1"]
+  clientConfig:
+    service:
+      name: trivy-operator-webhook
+      namespace: trivy-system
+      path: /validate
+  rules:
+  - operations: ["CREATE", "UPDATE"]
+    apiGroups: [""]
+    apiVersions: ["v1"]
+    resources: ["pods"]
+  - operations: ["CREATE", "UPDATE"]
+    apiGroups: ["apps"]
+    apiVersions: ["v1"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+  failurePolicy: Fail
+  sideEffects: None
+  timeoutSeconds: 30

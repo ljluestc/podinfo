@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(mkdir:*)",
+      "Bash(npx -y task-master-ai parse-prd .taskmaster/docs/kubernetes-security-cluster-prd.txt --research)",
+      "Bash(timeout 240 npx -y task-master-ai list)",
+      "mcp__task-master-ai__parse_prd",
+      "mcp__task-master-ai__generate",
+      "mcp__task-master-ai__get_tasks",
+      "mcp__task-master-ai__expand_task",
+      "Bash(tree:*)",
+      "Bash(find:*)",
+      "Bash(for:*)",
+      "Bash(do cat \"$file\")",
+      "Bash(done)",
+      "Bash(cat:*)",
+      "Bash(npx:*)",
+      "Bash(timeout 30 npx -y task-master-ai list:*)",
+      "mcp__task-master-ai__get_task",
+      "mcp__task-master-ai__add_subtask",
+      "Bash(tee:*)",
+      "Bash(kubectl:*)",
+      "Bash(chmod:*)"
+    ]
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "task-master-ai"
+  ]
+}

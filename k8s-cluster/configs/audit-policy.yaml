@@ -1,0 +1,139 @@
+---
+# Kubernetes Audit Policy for Comprehensive Logging
+apiVersion: audit.k8s.io/v1
+kind: Policy
+# Don't generate audit events for all requests in RequestReceived stage.
+omitStages:
+  - "RequestReceived"
+
+rules:
+  # Log all requests at the Metadata level for secrets
+  - level: Metadata
+    resources:
+      - group: ""
+        resources: ["secrets"]
+
+  # Log pod exec/attach/portforward at Metadata level
+  - level: Metadata
+    resources:
+      - group: ""
+        resources: ["pods/exec", "pods/attach", "pods/portforward"]
+
+  # Log authentication/authorization at Metadata level
+  - level: Metadata
+    verbs: ["create", "update", "patch", "delete"]
+    resources:
+      - group: "rbac.authorization.k8s.io"
+        resources: ["clusterroles", "clusterrolebindings", "roles", "rolebindings"]
+      - group: ""
+        resources: ["serviceaccounts"]
+
+  # Log certificate signing requests
+  - level: Metadata
+    resources:
+      - group: "certificates.k8s.io"
+        resources: ["certificatesigningrequests"]
+
+  # Log admission webhooks
+  - level: Metadata
+    resources:
+      - group: "admissionregistration.k8s.io"
+        resources: ["validatingwebhookconfigurations", "mutatingwebhookconfigurations"]
+
+  # Log policy changes
+  - level: Metadata
+    resources:
+      - group: "policy"
+        resources: ["podsecuritypolicies", "poddisruptionbudgets"]
+      - group: "networking.k8s.io"
+        resources: ["networkpolicies"]
+
+  # Log namespace lifecycle
+  - level: RequestResponse
+    verbs: ["create", "delete"]
+    resources:
+      - group: ""
+        resources: ["namespaces"]
+
+  # Log all create/update/patch/delete operations at Request level for important resources
+  - level: Request
+    verbs: ["create", "update", "patch", "delete"]
+    resources:
+      - group: ""
+        resources: ["pods", "services", "persistentvolumeclaims", "configmaps"]
+      - group: "apps"
+        resources: ["deployments", "daemonsets", "statefulsets", "replicasets"]
+      - group: "batch"
+        resources: ["jobs", "cronjobs"]
+      - group: "networking.k8s.io"
+        resources: ["ingresses"]
+
+  # Log custom resources at Metadata level
+  - level: Metadata
+    resources:
+      - group: "apiextensions.k8s.io"
+        resources: ["customresourcedefinitions"]
+
+  # Log storage operations
+  - level: Metadata
+    resources:
+      - group: "storage.k8s.io"
+        resources: ["storageclasses", "volumeattachments"]
+      - group: ""
+        resources: ["persistentvolumes"]
+
+  # Log everything else at Metadata level (excluding get/list/watch)
+  - level: Metadata
+    verbs: ["create", "update", "patch", "delete"]
+    omitManagedFields: true
+
+  # Default: don't log read operations
+  - level: None
+    verbs: ["get", "list", "watch"]
+    resources:
+      - group: ""
+      - group: "admissionregistration.k8s.io"
+      - group: "apiextensions.k8s.io"
+      - group: "apiregistration.k8s.io"
+      - group: "apps"
+      - group: "authentication.k8s.io"
+      - group: "authorization.k8s.io"
+      - group: "autoscaling"
+      - group: "batch"
+      - group: "certificates.k8s.io"
+      - group: "extensions"
+      - group: "metrics.k8s.io"
+      - group: "networking.k8s.io"
+      - group: "node.k8s.io"
+      - group: "policy"
+      - group: "rbac.authorization.k8s.io"
+      - group: "scheduling.k8s.io"
+      - group: "settings.k8s.io"
+      - group: "storage.k8s.io"
+
+  # Don't log system component requests
+  - level: None
+    userGroups:
+      - "system:nodes"
+    verb: ["get"]
+    resources:
+      - group: ""
+        resources: ["nodes", "nodes/status"]
+
+  # Don't log health check requests
+  - level: None
+    users:
+      - "system:kube-proxy"
+      - "system:kube-controller-manager"
+      - "system:kube-scheduler"
+    verbs: ["get", "list", "watch"]
+
+  # Don't log status updates
+  - level: None
+    resources:
+      - group: ""
+        resources: ["events"]
+
+  # Catch-all: log everything else at Metadata level
+  - level: Metadata
+    omitManagedFields: true

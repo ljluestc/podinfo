@@ -1,0 +1,11 @@
+# Task ID: 17
+# Title: Configure workload management (Deployments, StatefulSets, DaemonSets, Jobs)
+# Status: pending
+# Dependencies: 1, 9
+# Priority: medium
+# Description: Set up deployment strategies, StatefulSets for stateful apps, and batch job management
+# Details:
+Implement rolling update strategies with proper health checks and readiness probes. Configure blue-green and canary deployment capabilities. Set up StatefulSets for stateful applications with persistent volume claims. Deploy DaemonSets for node-level services with proper resource limits. Configure CronJobs for scheduled tasks with cleanup policies. Implement pod disruption budgets for high availability. Set up priority classes for workload scheduling. Configure resource quotas and limit ranges. Document workload management best practices and procedures.
+
+# Test Strategy:
+Test rolling updates work correctly, verify StatefulSet deployments, validate DaemonSet updates, test CronJob execution, verify PDBs prevent disruptions

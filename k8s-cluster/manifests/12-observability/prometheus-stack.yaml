@@ -1,0 +1,159 @@
+---
+# Prometheus Stack Installation (Prometheus + Grafana + Alertmanager)
+# Install via Helm:
+# helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+# helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+#   --namespace monitoring \
+#   --create-namespace \
+#   --set prometheus.prometheusSpec.retention=30d \
+#   --set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.resources.requests.storage=50Gi \
+#   --set grafana.adminPassword=<SECURE_PASSWORD>
+
+# Prometheus ServiceMonitor for application metrics
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: app-metrics
+  namespace: monitoring
+  labels:
+    app: myapp
+spec:
+  selector:
+    matchLabels:
+      app: myapp
+  endpoints:
+  - port: metrics
+    interval: 30s
+    path: /metrics
+
+---
+# PodMonitor for pod-level metrics
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: pod-metrics
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      monitoring: enabled
+  podMetricsEndpoints:
+  - port: metrics
+    interval: 30s
+
+---
+# PrometheusRule for custom alerts
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: custom-alerts
+  namespace: monitoring
+spec:
+  groups:
+  - name: kubernetes.rules
+    interval: 30s
+    rules:
+    # High Pod CPU
+    - alert: HighPodCPU
+      expr: sum(rate(container_cpu_usage_seconds_total{container!=""}[5m])) by (pod, namespace) > 0.8
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "High CPU usage detected"
+        description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has high CPU usage"
+
+    # High Pod Memory
+    - alert: HighPodMemory
+      expr: sum(container_memory_working_set_bytes{container!=""}) by (pod, namespace) / sum(container_spec_memory_limit_bytes{container!=""}) by (pod, namespace) > 0.9
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "High memory usage detected"
+        description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} is using {{ $value | humanizePercentage }} of its memory limit"
+
+    # Pod Restart
+    - alert: PodRestarting
+      expr: rate(kube_pod_container_status_restarts_total[15m]) > 0
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Pod is restarting frequently"
+        description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has restarted {{ $value }} times in the last 15 minutes"
+
+    # Node Not Ready
+    - alert: NodeNotReady
+      expr: kube_node_status_condition{condition="Ready",status="true"} == 0
+      for: 5m
+      labels:
+        severity: critical
+      annotations:
+        summary: "Node is not ready"
+        description: "Node {{ $labels.node }} has been in NotReady state for more than 5 minutes"
+
+    # Disk Pressure
+    - alert: NodeDiskPressure
+      expr: kube_node_status_condition{condition="DiskPressure",status="true"} == 1
+      for: 2m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Node has disk pressure"
+        description: "Node {{ $labels.node }} is experiencing disk pressure"
+
+    # High API Server Latency
+    - alert: HighAPIServerLatency
+      expr: histogram_quantile(0.99, sum(rate(apiserver_request_duration_seconds_bucket{verb!="WATCH"}[5m])) by (verb, le)) > 1
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "High API server latency"
+        description: "API server has high latency for {{ $labels.verb }} requests"
+
+    # Certificate Expiration
+    - alert: CertificateExpiringSoon
+      expr: (apiserver_client_certificate_expiration_seconds < 7*24*3600) and (apiserver_client_certificate_expiration_seconds > 0)
+      for: 1h
+      labels:
+        severity: warning
+      annotations:
+        summary: "Certificate expiring soon"
+        description: "Certificate will expire in {{ $value | humanizeDuration }}"
+
+---
+# Grafana Dashboard ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  kubernetes-cluster.json: |
+    {
+      "dashboard": {
+        "title": "Kubernetes Cluster Overview",
+        "panels": [
+          {
+            "title": "CPU Usage",
+            "targets": [
+              {
+                "expr": "sum(rate(container_cpu_usage_seconds_total[5m])) by (namespace)"
+              }
+            ]
+          },
+          {
+            "title": "Memory Usage",
+            "targets": [
+              {
+                "expr": "sum(container_memory_working_set_bytes) by (namespace)"
+              }
+            ]
+          }
+        ]
+      }
+    }

@@ -1,0 +1,11 @@
+# Task ID: 4
+# Title: Deploy secrets management and encryption infrastructure
+# Status: pending
+# Dependencies: 1, 2
+# Priority: critical
+# Description: Integrate external secrets management, implement secrets rotation, and encrypt secrets at rest
+# Details:
+Deploy External Secrets Operator or Sealed Secrets for secrets management. Integrate with HashiCorp Vault or cloud KMS for secure secret storage. Implement automated secrets rotation policies. Configure secrets encryption at rest in etcd. Set up RBAC for secrets access with least privilege. Implement secrets scanning in CI/CD pipeline. Configure audit logging for all secrets access. Document secrets management procedures and runbooks.
+
+# Test Strategy:
+Test external secrets sync, verify secrets encryption at rest, validate rotation policies work, test RBAC for secrets access, verify secrets scanning catches issues

@@ -1,0 +1,285 @@
+---
+# Namespace for podinfo application
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: podinfo
+  labels:
+    name: podinfo
+    app.kubernetes.io/name: podinfo
+
+---
+# Podinfo Rollout with Canary Strategy
+# 5-Stage Progressive Delivery: 10% → 30% → 50% → 75% → 100%
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: podinfo
+  namespace: podinfo
+  labels:
+    app: podinfo
+    version: stable
+spec:
+  replicas: 6
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      app: podinfo
+
+  # Canary deployment strategy with automated analysis
+  strategy:
+    canary:
+      # Reference to stable and canary services
+      canaryService: podinfo-canary
+      stableService: podinfo-stable
+
+      # Traffic routing via NGINX Ingress
+      trafficRouting:
+        nginx:
+          stableIngress: podinfo-stable
+          annotationPrefix: nginx.ingress.kubernetes.io
+          additionalIngressAnnotations:
+            canary-by-header: X-Canary
+            canary-by-header-value: "true"
+
+      # 5-Stage canary progression
+      steps:
+      # Stage 1: 10% traffic to canary
+      - setWeight: 10
+      - pause:
+          duration: 2m
+      - analysis:
+          templates:
+          - templateName: podinfo-success-rate
+          - templateName: podinfo-latency
+          args:
+          - name: service-name
+            value: podinfo-canary
+
+      # Stage 2: 30% traffic to canary
+      - setWeight: 30
+      - pause:
+          duration: 5m
+      - analysis:
+          templates:
+          - templateName: podinfo-success-rate
+          - templateName: podinfo-latency
+          - templateName: podinfo-error-rate
+          args:
+          - name: service-name
+            value: podinfo-canary
+
+      # Stage 3: 50% traffic to canary (manual gate for production)
+      - setWeight: 50
+      - pause: {}  # Manual approval required
+      - analysis:
+          templates:
+          - templateName: podinfo-success-rate
+          - templateName: podinfo-latency
+          - templateName: podinfo-error-rate
+          args:
+          - name: service-name
+            value: podinfo-canary
+
+      # Stage 4: 75% traffic to canary
+      - setWeight: 75
+      - pause:
+          duration: 5m
+      - analysis:
+          templates:
+          - templateName: podinfo-success-rate
+          - templateName: podinfo-latency
+          args:
+          - name: service-name
+            value: podinfo-canary
+
+      # Stage 5: 100% traffic to canary (full promotion)
+      - setWeight: 100
+      - pause:
+          duration: 1m
+
+      # Analysis template configuration
+      analysis:
+        templates:
+        - templateName: podinfo-success-rate
+        - templateName: podinfo-latency
+        startingStep: 1
+        args:
+        - name: service-name
+          value: podinfo-canary
+
+      # Anti-affinity to spread canary pods
+      antiAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          podAffinityTerm:
+            labelSelector:
+              matchLabels:
+                app: podinfo
+            topologyKey: kubernetes.io/hostname
+          weight: 100
+
+  # Pod template
+  template:
+    metadata:
+      labels:
+        app: podinfo
+        version: "{{.Revision}}"
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9898"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+      - name: podinfo
+        image: ghcr.io/stefanprodan/podinfo:6.9.2
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 9898
+          protocol: TCP
+        - name: http-metrics
+          containerPort: 9797
+          protocol: TCP
+        - name: grpc
+          containerPort: 9999
+          protocol: TCP
+
+        command:
+        - ./podinfo
+        - --port=9898
+        - --port-metrics=9797
+        - --grpc-port=9999
+        - --grpc-service-name=podinfo
+        - --level=info
+        - --random-delay=false
+        - --random-error=false
+
+        env:
+        - name: PODINFO_UI_COLOR
+          value: "#34577c"
+
+        livenessProbe:
+          exec:
+            command:
+            - podcli
+            - check
+            - http
+            - localhost:9898/healthz
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+          successThreshold: 1
+
+        readinessProbe:
+          exec:
+            command:
+            - podcli
+            - check
+            - http
+            - localhost:9898/readyz
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+          successThreshold: 1
+
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+
+---
+# Stable Service (points to stable pods)
+apiVersion: v1
+kind: Service
+metadata:
+  name: podinfo-stable
+  namespace: podinfo
+  labels:
+    app: podinfo
+    service: stable
+spec:
+  type: ClusterIP
+  ports:
+  - port: 9898
+    targetPort: http
+    protocol: TCP
+    name: http
+  - port: 9797
+    targetPort: http-metrics
+    protocol: TCP
+    name: http-metrics
+  - port: 9999
+    targetPort: grpc
+    protocol: TCP
+    name: grpc
+  selector:
+    app: podinfo
+
+---
+# Canary Service (points to canary pods during rollout)
+apiVersion: v1
+kind: Service
+metadata:
+  name: podinfo-canary
+  namespace: podinfo
+  labels:
+    app: podinfo
+    service: canary
+spec:
+  type: ClusterIP
+  ports:
+  - port: 9898
+    targetPort: http
+    protocol: TCP
+    name: http
+  - port: 9797
+    targetPort: http-metrics
+    protocol: TCP
+    name: http-metrics
+  - port: 9999
+    targetPort: grpc
+    protocol: TCP
+    name: grpc
+  selector:
+    app: podinfo
+
+---
+# Main Service (for general access)
+apiVersion: v1
+kind: Service
+metadata:
+  name: podinfo
+  namespace: podinfo
+  labels:
+    app: podinfo
+spec:
+  type: ClusterIP
+  ports:
+  - port: 9898
+    targetPort: http
+    protocol: TCP
+    name: http
+  - port: 9797
+    targetPort: http-metrics
+    protocol: TCP
+    name: http-metrics
+  - port: 9999
+    targetPort: grpc
+    protocol: TCP
+    name: grpc
+  selector:
+    app: podinfo

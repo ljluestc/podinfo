@@ -1,0 +1,265 @@
+---
+# Stable Ingress for Podinfo
+# This is the main ingress that receives all production traffic
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: podinfo-stable
+  namespace: podinfo
+  labels:
+    app: podinfo
+    version: stable
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+
+    # Rate limiting
+    nginx.ingress.kubernetes.io/limit-rps: "100"
+    nginx.ingress.kubernetes.io/limit-connections: "10"
+
+    # Timeouts
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+
+    # Security headers
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      more_set_headers "X-Frame-Options: DENY";
+      more_set_headers "X-Content-Type-Options: nosniff";
+      more_set_headers "X-XSS-Protection: 1; mode=block";
+      more_set_headers "Referrer-Policy: strict-origin-when-cross-origin";
+
+spec:
+  tls:
+  - hosts:
+    - podinfo.example.com
+    secretName: podinfo-tls
+  rules:
+  - host: podinfo.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: podinfo-stable
+            port:
+              number: 9898
+
+---
+# Canary Ingress for Podinfo
+# Argo Rollouts will dynamically adjust the canary weight annotation
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: podinfo-canary
+  namespace: podinfo
+  labels:
+    app: podinfo
+    version: canary
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+
+    # Canary annotations (managed by Argo Rollouts)
+    nginx.ingress.kubernetes.io/canary: "true"
+    nginx.ingress.kubernetes.io/canary-weight: "0"
+    nginx.ingress.kubernetes.io/canary-by-header: "X-Canary"
+    nginx.ingress.kubernetes.io/canary-by-header-value: "true"
+    nginx.ingress.kubernetes.io/canary-by-cookie: "canary"
+
+    # Security headers
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      more_set_headers "X-Frame-Options: DENY";
+      more_set_headers "X-Content-Type-Options: nosniff";
+      more_set_headers "X-XSS-Protection: 1; mode=block";
+
+spec:
+  tls:
+  - hosts:
+    - podinfo.example.com
+    secretName: podinfo-tls
+  rules:
+  - host: podinfo.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: podinfo-canary
+            port:
+              number: 9898
+
+---
+# Internal Ingress for Testing
+# Allows internal testing of canary without affecting production
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: podinfo-canary-test
+  namespace: podinfo
+  labels:
+    app: podinfo
+    version: canary-test
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+spec:
+  rules:
+  - host: podinfo-canary.internal
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: podinfo-canary
+            port:
+              number: 9898
+
+---
+# Certificate for TLS (if using cert-manager)
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: podinfo-tls
+  namespace: podinfo
+spec:
+  secretName: podinfo-tls
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  dnsNames:
+  - podinfo.example.com
+  duration: 2160h  # 90 days
+  renewBefore: 360h  # 15 days
+
+---
+# NetworkPolicy to allow ingress traffic
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: podinfo-ingress
+  namespace: podinfo
+spec:
+  podSelector:
+    matchLabels:
+      app: podinfo
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow traffic from ingress controller
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 9898
+    - protocol: TCP
+      port: 9797
+  # Allow traffic from monitoring namespace
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+    ports:
+    - protocol: TCP
+      port: 9797
+  # Allow traffic from same namespace (for service-to-service)
+  - from:
+    - podSelector: {}
+    ports:
+    - protocol: TCP
+      port: 9898
+    - protocol: TCP
+      port: 9797
+    - protocol: TCP
+      port: 9999
+  egress:
+  # Allow DNS
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+  # Allow all outbound traffic (adjust as needed)
+  - to:
+    - podSelector: {}
+  - to:
+    - namespaceSelector: {}
+
+---
+# Alternative: Istio VirtualService for Service Mesh
+# Uncomment if using Istio instead of NGINX Ingress
+# apiVersion: networking.istio.io/v1beta1
+# kind: VirtualService
+# metadata:
+#   name: podinfo
+#   namespace: podinfo
+# spec:
+#   hosts:
+#   - podinfo.example.com
+#   gateways:
+#   - podinfo-gateway
+#   http:
+#   - match:
+#     - headers:
+#         X-Canary:
+#           exact: "true"
+#     route:
+#     - destination:
+#         host: podinfo-canary
+#         port:
+#           number: 9898
+#       weight: 100
+#   - route:
+#     - destination:
+#         host: podinfo-stable
+#         port:
+#           number: 9898
+#       weight: 100
+#     - destination:
+#         host: podinfo-canary
+#         port:
+#           number: 9898
+#       weight: 0  # Managed by Argo Rollouts
+
+---
+# Alternative: Istio DestinationRule
+# apiVersion: networking.istio.io/v1beta1
+# kind: DestinationRule
+# metadata:
+#   name: podinfo
+#   namespace: podinfo
+# spec:
+#   host: podinfo
+#   trafficPolicy:
+#     tls:
+#       mode: ISTIO_MUTUAL
+#     connectionPool:
+#       tcp:
+#         maxConnections: 100
+#       http:
+#         http1MaxPendingRequests: 50
+#         http2MaxRequests: 100
+#     outlierDetection:
+#       consecutiveErrors: 5
+#       interval: 30s
+#       baseEjectionTime: 30s
+#       maxEjectionPercent: 50
+#   subsets:
+#   - name: stable
+#     labels:
+#       version: stable
+#   - name: canary
+#     labels:
+#       version: canary

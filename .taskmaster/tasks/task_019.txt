@@ -1,0 +1,11 @@
+# Task ID: 19
+# Title: Configure DNS and service discovery
+# Status: pending
+# Dependencies: 1, 5
+# Priority: medium
+# Description: Set up CoreDNS customization, external DNS, and service discovery mechanisms
+# Details:
+Configure CoreDNS with custom zones and upstream resolvers. Implement DNS caching and performance tuning. Deploy External DNS for automatic DNS record creation. Configure service discovery mechanisms for service-to-service communication. Set up split-horizon DNS for internal/external access. Implement DNS monitoring and troubleshooting tools. Configure DNS-based load balancing. Document DNS architecture and troubleshooting procedures.
+
+# Test Strategy:
+Test DNS resolution works correctly, verify external DNS creates records, validate service discovery, test split-horizon DNS

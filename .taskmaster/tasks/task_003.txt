@@ -1,0 +1,11 @@
+# Task ID: 3
+# Title: Configure pod security and workload hardening
+# Status: pending
+# Dependencies: 1, 2
+# Priority: critical
+# Description: Implement Pod Security Standards, Security Contexts, and capability restrictions
+# Details:
+Implement Pod Security Standards (restricted, baseline, privileged) across namespaces. Configure Security Contexts for all workloads with appropriate restrictions. Set up AppArmor or SELinux profiles for enhanced isolation. Implement seccomp profiles for system call filtering. Configure read-only root filesystems where applicable. Drop unnecessary Linux capabilities from containers. Enforce non-root user execution for all pods. Implement comprehensive resource limits and quotas.
+
+# Test Strategy:
+Verify Pod Security Standards are enforced, test Security Context restrictions, validate AppArmor/SELinux profiles, confirm seccomp profiles work, test capability restrictions

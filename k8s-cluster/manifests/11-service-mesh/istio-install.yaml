@@ -1,0 +1,193 @@
+---
+# Istio Service Mesh Installation
+# Install via:
+# curl -L https://istio.io/downloadIstio | sh -
+# cd istio-*
+# export PATH=$PWD/bin:$PATH
+# istioctl install --set profile=production -y
+
+# Istio Configuration
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+metadata:
+  namespace: istio-system
+  name: istio-control-plane
+spec:
+  profile: production
+  meshConfig:
+    accessLogFile: /dev/stdout
+    enableTracing: true
+    defaultConfig:
+      tracing:
+        zipkin:
+          address: jaeger-collector.observability:9411
+      holdApplicationUntilProxyStarts: true
+    # Enable mTLS by default
+    enableAutoMtls: true
+    # Trust domain
+    trustDomain: cluster.local
+  components:
+    pilot:
+      k8s:
+        resources:
+          requests:
+            cpu: 500m
+            memory: 2048Mi
+        hpaSpec:
+          minReplicas: 2
+          maxReplicas: 5
+    ingressGateways:
+    - name: istio-ingressgateway
+      enabled: true
+      k8s:
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        hpaSpec:
+          minReplicas: 2
+          maxReplicas: 5
+        service:
+          type: LoadBalancer
+    egressGateways:
+    - name: istio-egressgateway
+      enabled: true
+      k8s:
+        hpaSpec:
+          minReplicas: 2
+          maxReplicas: 5
+  values:
+    global:
+      # Enable policy checks
+      policyCheckFailOpen: false
+      # Pod Security Standards
+      jwtPolicy: third-party-jwt
+      # Logging
+      proxy:
+        logLevel: warning
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 2000m
+            memory: 1024Mi
+    pilot:
+      traceSampling: 1.0
+
+---
+# PeerAuthentication - Enforce mTLS cluster-wide
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: istio-system
+spec:
+  mtls:
+    mode: STRICT
+
+---
+# AuthorizationPolicy - Default deny-all
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: deny-all
+  namespace: istio-system
+spec:
+  {}
+
+---
+# Sidecar injection configuration
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: production
+  labels:
+    istio-injection: enabled
+
+---
+# Virtual Service Example
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: app-virtual-service
+  namespace: production
+spec:
+  hosts:
+  - app.example.com
+  gateways:
+  - app-gateway
+  http:
+  - match:
+    - uri:
+        prefix: /api/v1
+    route:
+    - destination:
+        host: app-service-v1
+        port:
+          number: 80
+      weight: 90
+    - destination:
+        host: app-service-v2
+        port:
+          number: 80
+      weight: 10
+    retries:
+      attempts: 3
+      perTryTimeout: 2s
+    timeout: 10s
+
+---
+# Destination Rule with Circuit Breaker
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: app-destination-rule
+  namespace: production
+spec:
+  host: app-service
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 100
+      http:
+        http1MaxPendingRequests: 50
+        http2MaxRequests: 100
+        maxRequestsPerConnection: 2
+    outlierDetection:
+      consecutive5xxErrors: 5
+      interval: 30s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+      minHealthPercent: 40
+    tls:
+      mode: ISTIO_MUTUAL
+
+---
+# Gateway Configuration
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: app-gateway
+  namespace: production
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - app.example.com
+    tls:
+      httpsRedirect: true
+  - port:
+      number: 443
+      name: https
+      protocol: HTTPS
+    hosts:
+    - app.example.com
+    tls:
+      mode: SIMPLE
+      credentialName: app-tls-cert

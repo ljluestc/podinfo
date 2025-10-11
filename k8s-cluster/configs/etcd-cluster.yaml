@@ -1,0 +1,80 @@
+---
+# etcd Cluster Configuration for HA
+# Deploy as static pods on control plane nodes
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: etcd
+  namespace: kube-system
+  labels:
+    component: etcd
+    tier: control-plane
+spec:
+  hostNetwork: true
+  priority:System2000001000
+  priorityClassName: system-node-critical
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+  - name: etcd
+    image: registry.k8s.io/etcd:3.5.9-0
+    imagePullPolicy: IfNotPresent
+    command:
+    - etcd
+    - --name=etcd-1
+    - --initial-advertise-peer-urls=https://10.0.0.10:2380
+    - --listen-peer-urls=https://10.0.0.10:2380
+    - --listen-client-urls=https://10.0.0.10:2379,https://127.0.0.1:2379
+    - --advertise-client-urls=https://10.0.0.10:2379
+    - --initial-cluster=etcd-1=https://10.0.0.10:2380,etcd-2=https://10.0.0.11:2380,etcd-3=https://10.0.0.12:2380
+    - --initial-cluster-state=new
+    - --initial-cluster-token=etcd-cluster-1
+    - --data-dir=/var/lib/etcd
+   - --cert-file=/etc/kubernetes/pki/etcd/server.crt
+    - --key-file=/etc/kubernetes/pki/etcd/server.key
+    - --peer-cert-file=/etc/kubernetes/pki/etcd/peer.crt
+    - --peer-key-file=/etc/kubernetes/pki/etcd/peer.key
+    - --trusted-ca-file=/etc/kubernetes/pki/etcd/ca.crt
+    - --peer-trusted-ca-file=/etc/kubernetes/pki/etcd/ca.crt
+    - --client-cert-auth=true
+    - --peer-client-cert-auth=true
+    - --snapshot-count=10000
+    - --auto-compaction-retention=8
+    - --auto-compaction-mode=periodic
+    - --quota-backend-bytes=8589934592  # 8GB
+    - --heartbeat-interval=100
+    - --election-timeout=1000
+    - --listen-metrics-urls=http://0.0.0.0:2381
+    livenessProbe:
+      httpGet:
+        path: /health
+        port: 2381
+        scheme: HTTP
+      initialDelaySeconds: 15
+      periodSeconds: 10
+      timeoutSeconds: 15
+      failureThreshold: 8
+    resources:
+      requests:
+        cpu: 100m
+        memory: 100Mi
+      limits:
+        cpu: "2"
+        memory: "8Gi"
+    volumeMounts:
+    - name: etcd-data
+      mountPath: /var/lib/etcd
+    - name: etcd-certs
+      mountPath: /etc/kubernetes/pki/etcd
+      readOnly: true
+  volumes:
+  - name: etcd-data
+    hostPath:
+      path: /var/lib/etcd
+      type: DirectoryOrCreate
+  - name: etcd-certs
+    hostPath:
+      path: /etc/kubernetes/pki/etcd
+      type: DirectoryOrCreate

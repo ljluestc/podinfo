@@ -1,0 +1,72 @@
+---
+# Loki Logging Stack (Loki + Promtail + Grafana integration)
+# Install via Helm:
+# helm repo add grafana https://grafana.github.io/helm-charts
+# helm install loki grafana/loki-stack \
+#   --namespace logging \
+#   --create-namespace \
+#   --set loki.persistence.enabled=true \
+#   --set loki.persistence.size=100Gi \
+#   --set promtail.enabled=true
+
+# Promtail Configuration for log collection
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: promtail-config
+  namespace: logging
+data:
+  promtail.yaml: |
+    server:
+      http_listen_port: 9080
+      grpc_listen_port: 0
+
+    positions:
+      filename: /tmp/positions.yaml
+
+    clients:
+      - url: http://loki:3100/loki/api/v1/push
+
+    scrape_configs:
+    # Kubernetes pod logs
+    - job_name: kubernetes-pods
+      kubernetes_sd_configs:
+      - role: pod
+      relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        target_label: app
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+      - source_labels: [__meta_kubernetes_pod_container_name]
+        target_label: container
+
+    # System logs
+    - job_name: system
+      static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: varlogs
+          __path__: /var/log/*log
+
+---
+# Loki Data Source for Grafana
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasource-loki
+  namespace: monitoring
+  labels:
+    grafana_datasource: "1"
+data:
+  loki-datasource.yaml: |
+    apiVersion: 1
+    datasources:
+    - name: Loki
+      type: loki
+      access: proxy
+      url: http://loki.logging:3100
+      jsonData:
+        maxLines: 1000

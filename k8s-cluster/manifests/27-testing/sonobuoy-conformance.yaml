@@ -1,0 +1,108 @@
+---
+# Sonobuoy for Kubernetes Conformance Testing
+# Install via:
+# wget https://github.com/vmware-tanzu/sonobuoy/releases/download/v0.57.0/sonobuoy_0.57.0_linux_amd64.tar.gz
+# tar -xzf sonobuoy_0.57.0_linux_amd64.tar.gz
+# sudo mv sonobuoy /usr/local/bin/
+
+# Run conformance tests:
+# sonobuoy run --mode=certified-conformance --wait
+
+# Check status:
+# sonobuoy status
+
+# Retrieve results:
+# sonobuoy retrieve
+
+# Cleanup:
+# sonobuoy delete
+
+---
+# Chaos Mesh for Chaos Engineering
+# Install via Helm:
+# helm repo add chaos-mesh https://charts.chaos-mesh.org
+# helm install chaos-mesh chaos-mesh/chaos-mesh \
+#   --namespace=chaos-testing \
+#   --create-namespace \
+#   --set chaosDaemon.runtime=containerd \
+#   --set chaosDaemon.socketPath=/run/containerd/containerd.sock
+
+# PodChaos Example - Random pod failure
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: pod-failure-test
+  namespace: chaos-testing
+spec:
+  action: pod-failure
+  mode: one
+  duration: "30s"
+  selector:
+    namespaces:
+      - production
+    labelSelectors:
+      app: myapp
+
+---
+# NetworkChaos Example - Network latency
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: network-delay-test
+  namespace: chaos-testing
+spec:
+  action: delay
+  mode: one
+  selector:
+    namespaces:
+      - production
+    labelSelectors:
+      app: myapp
+  delay:
+    latency: "100ms"
+    correlation: "100"
+    jitter: "0ms"
+  duration: "5m"
+
+---
+# StressChaos Example - CPU/Memory stress
+apiVersion: chaos-mesh.org/v1alpha1
+kind: StressChaos
+metadata:
+  name: stress-test
+  namespace: chaos-testing
+spec:
+  mode: one
+  selector:
+    namespaces:
+      - production
+    labelSelectors:
+      app: myapp
+  stressors:
+    cpu:
+      workers: 2
+      load: 80
+    memory:
+      workers: 1
+      size: "256MB"
+  duration: "5m"
+
+---
+# Schedule for Regular Chaos Tests
+apiVersion: chaos-mesh.org/v1alpha1
+kind: Schedule
+metadata:
+  name: scheduled-chaos
+  namespace: chaos-testing
+spec:
+  schedule: "0 2 * * 6"  # Every Saturday at 2 AM
+  type: PodChaos
+  podChaos:
+    action: pod-kill
+    mode: fixed-percent
+    value: "10"
+    selector:
+      namespaces:
+        - production
+      labelSelectors:
+        chaos-test: enabled

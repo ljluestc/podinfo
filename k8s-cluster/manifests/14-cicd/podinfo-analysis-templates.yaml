@@ -1,0 +1,326 @@
+---
+# AnalysisTemplate for Success Rate Monitoring
+# Checks that HTTP success rate stays above 95%
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: podinfo-success-rate
+  namespace: podinfo
+spec:
+  args:
+  - name: service-name
+    value: podinfo-canary
+  - name: prometheus-address
+    value: http://prometheus.monitoring.svc.cluster.local:9090
+
+  metrics:
+  - name: success-rate
+    interval: 30s
+    successCondition: result[0] >= 0.95
+    failureLimit: 3
+    provider:
+      prometheus:
+        address: "{{args.prometheus-address}}"
+        query: |
+          sum(rate(
+            http_request_duration_seconds_count{
+              job="{{args.service-name}}",
+              status=~"2.."
+            }[2m]
+          ))
+          /
+          sum(rate(
+            http_request_duration_seconds_count{
+              job="{{args.service-name}}"
+            }[2m]
+          ))
+
+---
+# AnalysisTemplate for Latency Monitoring
+# Checks that p95 latency stays below 500ms
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: podinfo-latency
+  namespace: podinfo
+spec:
+  args:
+  - name: service-name
+    value: podinfo-canary
+  - name: prometheus-address
+    value: http://prometheus.monitoring.svc.cluster.local:9090
+  - name: latency-threshold
+    value: "0.5"  # 500ms
+
+  metrics:
+  - name: latency-p95
+    interval: 30s
+    successCondition: result[0] <= {{args.latency-threshold}}
+    failureLimit: 3
+    provider:
+      prometheus:
+        address: "{{args.prometheus-address}}"
+        query: |
+          histogram_quantile(0.95,
+            sum(rate(
+              http_request_duration_seconds_bucket{
+                job="{{args.service-name}}"
+              }[2m]
+            )) by (le)
+          )
+
+  - name: latency-p99
+    interval: 30s
+    successCondition: result[0] <= 1.0
+    failureLimit: 3
+    provider:
+      prometheus:
+        address: "{{args.prometheus-address}}"
+        query: |
+          histogram_quantile(0.99,
+            sum(rate(
+              http_request_duration_seconds_bucket{
+                job="{{args.service-name}}"
+              }[2m]
+            )) by (le)
+          )
+
+---
+# AnalysisTemplate for Error Rate Monitoring
+# Checks that error rate stays below 5%
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: podinfo-error-rate
+  namespace: podinfo
+spec:
+  args:
+  - name: service-name
+    value: podinfo-canary
+  - name: prometheus-address
+    value: http://prometheus.monitoring.svc.cluster.local:9090
+  - name: error-rate-threshold
+    value: "0.05"  # 5%
+
+  metrics:
+  - name: error-rate
+    interval: 30s
+    successCondition: result[0] <= {{args.error-rate-threshold}}
+    failureLimit: 3
+    provider:
+      prometheus:
+        address: "{{args.prometheus-address}}"
+        query: |
+          sum(rate(
+            http_request_duration_seconds_count{
+              job="{{args.service-name}}",
+              status=~"5.."
+            }[2m]
+          ))
+          /
+          sum(rate(
+            http_request_duration_seconds_count{
+              job="{{args.service-name}}"
+            }[2m]
+          ))
+
+  - name: client-error-rate
+    interval: 30s
+    successCondition: result[0] <= 0.1
+    failureLimit: 5
+    provider:
+      prometheus:
+        address: "{{args.prometheus-address}}"
+        query: |
+          sum(rate(
+            http_request_duration_seconds_count{
+              job="{{args.service-name}}",
+              status=~"4.."
+            }[2m]
+          ))
+          /
+          sum(rate(
+            http_request_duration_seconds_count{
+              job="{{args.service-name}}"
+            }[2m]
+          ))
+
+---
+# AnalysisTemplate for Request Rate Monitoring
+# Ensures canary is receiving traffic
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: podinfo-request-rate
+  namespace: podinfo
+spec:
+  args:
+  - name: service-name
+    value: podinfo-canary
+  - name: prometheus-address
+    value: http://prometheus.monitoring.svc.cluster.local:9090
+
+  metrics:
+  - name: request-rate
+    interval: 30s
+    successCondition: result[0] > 0
+    failureLimit: 5
+    provider:
+      prometheus:
+        address: "{{args.prometheus-address}}"
+        query: |
+          sum(rate(
+            http_request_duration_seconds_count{
+              job="{{args.service-name}}"
+            }[1m]
+          ))
+
+---
+# AnalysisTemplate for CPU Usage Monitoring
+# Ensures canary pods aren't consuming excessive CPU
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: podinfo-cpu-usage
+  namespace: podinfo
+spec:
+  args:
+  - name: service-name
+    value: podinfo-canary
+  - name: prometheus-address
+    value: http://prometheus.monitoring.svc.cluster.local:9090
+  - name: cpu-threshold
+    value: "0.8"  # 80% of CPU limit
+
+  metrics:
+  - name: cpu-usage
+    interval: 30s
+    successCondition: result[0] <= {{args.cpu-threshold}}
+    failureLimit: 3
+    provider:
+      prometheus:
+        address: "{{args.prometheus-address}}"
+        query: |
+          sum(rate(
+            container_cpu_usage_seconds_total{
+              namespace="podinfo",
+              pod=~"podinfo-.*",
+              container="podinfo"
+            }[2m]
+          )) by (pod)
+          /
+          sum(
+            container_spec_cpu_quota{
+              namespace="podinfo",
+              pod=~"podinfo-.*",
+              container="podinfo"
+            } / 100000
+          ) by (pod)
+
+---
+# AnalysisTemplate for Memory Usage Monitoring
+# Ensures canary pods aren't consuming excessive memory
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: podinfo-memory-usage
+  namespace: podinfo
+spec:
+  args:
+  - name: service-name
+    value: podinfo-canary
+  - name: prometheus-address
+    value: http://prometheus.monitoring.svc.cluster.local:9090
+  - name: memory-threshold
+    value: "0.9"  # 90% of memory limit
+
+  metrics:
+  - name: memory-usage
+    interval: 30s
+    successCondition: result[0] <= {{args.memory-threshold}}
+    failureLimit: 3
+    provider:
+      prometheus:
+        address: "{{args.prometheus-address}}"
+        query: |
+          sum(
+            container_memory_working_set_bytes{
+              namespace="podinfo",
+              pod=~"podinfo-.*",
+              container="podinfo"
+            }
+          ) by (pod)
+          /
+          sum(
+            container_spec_memory_limit_bytes{
+              namespace="podinfo",
+              pod=~"podinfo-.*",
+              container="podinfo"
+            }
+          ) by (pod)
+
+---
+# Combined AnalysisTemplate for Complete Health Check
+# Runs all metrics checks together
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: podinfo-complete-analysis
+  namespace: podinfo
+spec:
+  args:
+  - name: service-name
+    value: podinfo-canary
+  - name: prometheus-address
+    value: http://prometheus.monitoring.svc.cluster.local:9090
+
+  metrics:
+  # Success rate check
+  - name: success-rate
+    interval: 30s
+    successCondition: result[0] >= 0.95
+    failureLimit: 3
+    provider:
+      prometheus:
+        address: "{{args.prometheus-address}}"
+        query: |
+          sum(rate(http_request_duration_seconds_count{job="{{args.service-name}}",status=~"2.."}[2m]))
+          /
+          sum(rate(http_request_duration_seconds_count{job="{{args.service-name}}"}[2m]))
+
+  # Latency check
+  - name: latency-p95
+    interval: 30s
+    successCondition: result[0] <= 0.5
+    failureLimit: 3
+    provider:
+      prometheus:
+        address: "{{args.prometheus-address}}"
+        query: |
+          histogram_quantile(0.95,
+            sum(rate(http_request_duration_seconds_bucket{job="{{args.service-name}}"}[2m])) by (le)
+          )
+
+  # Error rate check
+  - name: error-rate
+    interval: 30s
+    successCondition: result[0] <= 0.05
+    failureLimit: 3
+    provider:
+      prometheus:
+        address: "{{args.prometheus-address}}"
+        query: |
+          sum(rate(http_request_duration_seconds_count{job="{{args.service-name}}",status=~"5.."}[2m]))
+          /
+          sum(rate(http_request_duration_seconds_count{job="{{args.service-name}}"}[2m]))
+
+  # Traffic check
+  - name: request-rate
+    interval: 30s
+    successCondition: result[0] > 0
+    failureLimit: 5
+    provider:
+      prometheus:
+        address: "{{args.prometheus-address}}"
+        query: |
+          sum(rate(http_request_duration_seconds_count{job="{{args.service-name}}"}[1m]))

@@ -1,0 +1,326 @@
+---
+# ArgoCD AppProject for Podinfo
+# Defines the scope and permissions for podinfo deployments
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: podinfo
+  namespace: argocd
+  finalizers:
+  - resources-finalizer.argocd.argoproj.io
+spec:
+  description: Podinfo application project with canary deployment
+
+  # Source repositories
+  sourceRepos:
+  - '*'  # Allow all repos (restrict in production)
+
+  # Destination clusters and namespaces
+  destinations:
+  - namespace: podinfo
+    server: https://kubernetes.default.svc
+  - namespace: argo-rollouts
+    server: https://kubernetes.default.svc
+
+  # Cluster resource whitelist
+  clusterResourceWhitelist:
+  - group: ''
+    kind: Namespace
+  - group: rbac.authorization.k8s.io
+    kind: ClusterRole
+  - group: rbac.authorization.k8s.io
+    kind: ClusterRoleBinding
+
+  # Namespace resource blacklist (prevent modification)
+  namespaceResourceBlacklist:
+  - group: ''
+    kind: ResourceQuota
+  - group: ''
+    kind: LimitRange
+
+  # Orphaned resources
+  orphanedResources:
+    warn: true
+
+  # Roles for RBAC
+  roles:
+  - name: developer
+    description: Developer role for podinfo
+    policies:
+    - p, proj:podinfo:developer, applications, get, podinfo/*, allow
+    - p, proj:podinfo:developer, applications, sync, podinfo/*, allow
+    groups:
+    - developers
+
+  - name: admin
+    description: Admin role for podinfo
+    policies:
+    - p, proj:podinfo:admin, applications, *, podinfo/*, allow
+    groups:
+    - admins
+
+---
+# ArgoCD Application for Podinfo
+# Manages the deployment of podinfo with canary strategy
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: podinfo
+  namespace: argocd
+  labels:
+    app: podinfo
+    environment: production
+  finalizers:
+  - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: "10"
+    notifications.argoproj.io/subscribe.on-deployed.slack: "deployments"
+    notifications.argoproj.io/subscribe.on-health-degraded.slack: "alerts"
+
+spec:
+  project: podinfo
+
+  # Source repository
+  source:
+    repoURL: https://github.com/stefanprodan/podinfo.git
+    targetRevision: HEAD
+    path: kustomize
+
+    # Kustomize configuration
+    kustomize:
+      namePrefix: ""
+      nameSuffix: ""
+      images:
+      - ghcr.io/stefanprodan/podinfo:6.9.2
+
+  # Destination cluster and namespace
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: podinfo
+
+  # Sync policy
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+
+    syncOptions:
+    - CreateNamespace=true
+    - PrunePropagationPolicy=foreground
+    - PruneLast=true
+    - RespectIgnoreDifferences=true
+    - ApplyOutOfSyncOnly=true
+
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+  # Ignore differences for certain fields
+  ignoreDifferences:
+  - group: argoproj.io
+    kind: Rollout
+    jsonPointers:
+    - /spec/replicas  # Ignore replicas (managed by HPA)
+  - kind: Service
+    jsonPointers:
+    - /spec/clusterIP
+    - /spec/clusterIPs
+
+  # Health assessment
+  revisionHistoryLimit: 10
+
+---
+# Alternative: ArgoCD Application using Helm
+# Uncomment if using Helm charts instead of Kustomize
+# apiVersion: argoproj.io/v1alpha1
+# kind: Application
+# metadata:
+#   name: podinfo-helm
+#   namespace: argocd
+# spec:
+#   project: podinfo
+#   source:
+#     repoURL: https://stefanprodan.github.io/podinfo
+#     chart: podinfo
+#     targetRevision: 6.9.2
+#     helm:
+#       releaseName: podinfo
+#       values: |
+#         replicaCount: 3
+#         image:
+#           repository: ghcr.io/stefanprodan/podinfo
+#           tag: 6.9.2
+#         service:
+#           type: ClusterIP
+#         ingress:
+#           enabled: true
+#           className: nginx
+#           hosts:
+#           - host: podinfo.example.com
+#             paths:
+#             - path: /
+#               pathType: Prefix
+#         resources:
+#           requests:
+#             cpu: 100m
+#             memory: 64Mi
+#           limits:
+#             cpu: 500m
+#             memory: 512Mi
+#   destination:
+#     server: https://kubernetes.default.svc
+#     namespace: podinfo
+#   syncPolicy:
+#     automated:
+#       prune: true
+#       selfHeal: true
+#     syncOptions:
+#     - CreateNamespace=true
+
+---
+# ArgoCD ApplicationSet for Multi-Environment Deployment
+# Manages podinfo across multiple environments
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: podinfo-environments
+  namespace: argocd
+spec:
+  generators:
+  - list:
+      elements:
+      - environment: dev
+        namespace: podinfo-dev
+        replicaCount: "2"
+        imageTag: "6.9.2"
+        autoSync: "true"
+      - environment: staging
+        namespace: podinfo-staging
+        replicaCount: "3"
+        imageTag: "6.9.2"
+        autoSync: "true"
+      - environment: production
+        namespace: podinfo
+        replicaCount: "6"
+        imageTag: "6.9.2"
+        autoSync: "false"  # Manual approval for prod
+
+  template:
+    metadata:
+      name: 'podinfo-{{environment}}'
+      labels:
+        environment: '{{environment}}'
+    spec:
+      project: podinfo
+      source:
+        repoURL: https://github.com/stefanprodan/podinfo.git
+        targetRevision: HEAD
+        path: kustomize
+        kustomize:
+          images:
+          - 'ghcr.io/stefanprodan/podinfo:{{imageTag}}'
+          replicas:
+          - name: podinfo
+            count: '{{replicaCount}}'
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: '{{namespace}}'
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: '{{autoSync}}'
+        syncOptions:
+        - CreateNamespace=true
+
+---
+# ArgoCD Notification Configuration for Podinfo
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-notifications-cm
+  namespace: argocd
+data:
+  service.slack: |
+    token: $slack-token
+
+  template.app-deployed: |
+    message: |
+      Application {{.app.metadata.name}} is now running new version.
+      Revision: {{.app.status.sync.revision}}
+    slack:
+      attachments: |
+        [{
+          "title": "{{ .app.metadata.name}}",
+          "title_link":"{{.context.argocdUrl}}/applications/{{.app.metadata.name}}",
+          "color": "#18be52",
+          "fields": [
+          {
+            "title": "Sync Status",
+            "value": "{{.app.status.sync.status}}",
+            "short": true
+          },
+          {
+            "title": "Repository",
+            "value": "{{.app.spec.source.repoURL}}",
+            "short": true
+          },
+          {
+            "title": "Revision",
+            "value": "{{.app.status.sync.revision}}",
+            "short": true
+          }
+          {{range $index, $c := .app.status.conditions}}
+          {{if not $index}},{{end}}
+          {{if $index}},{{end}}
+          {
+            "title": "{{$c.type}}",
+            "value": "{{$c.message}}",
+            "short": true
+          }
+          {{end}}
+          ]
+        }]
+
+  template.app-health-degraded: |
+    message: |
+      Application {{.app.metadata.name}} has degraded health status.
+    slack:
+      attachments: |
+        [{
+          "title": "{{ .app.metadata.name}}",
+          "title_link": "{{.context.argocdUrl}}/applications/{{.app.metadata.name}}",
+          "color": "#f4c030",
+          "fields": [
+          {
+            "title": "Health Status",
+            "value": "{{.app.status.health.status}}",
+            "short": true
+          },
+          {
+            "title": "Repository",
+            "value": "{{.app.spec.source.repoURL}}",
+            "short": true
+          }
+          {{range $index, $c := .app.status.conditions}}
+          {{if not $index}},{{end}}
+          {{if $index}},{{end}}
+          {
+            "title": "{{$c.type}}",
+            "value": "{{$c.message}}",
+            "short": true
+          }
+          {{end}}
+          ]
+        }]
+
+  trigger.on-deployed: |
+    - when: app.status.operationState.phase in ['Succeeded']
+      send: [app-deployed]
+
+  trigger.on-health-degraded: |
+    - when: app.status.health.status == 'Degraded'
+      send: [app-health-degraded]
