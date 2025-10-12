@@ -3,35 +3,44 @@ repos:
     rev: v4.4.0
     hooks:
       - id: trailing-whitespace
+        exclude: '\.md$'
       - id: end-of-file-fixer
+        exclude: '\.md$'
       - id: check-yaml
+        args: [--unsafe]
       - id: check-added-large-files
+        args: [--maxkb=1000]
       - id: check-merge-conflict
       - id: check-json
       - id: check-toml
       - id: check-xml
       - id: check-case-conflict
-      - id: check-merge-conflict
       - id: debug-statements
+        language: python
       - id: detect-private-key
+        exclude: 'test/.*'
 
   - repo: https://github.com/golangci/golangci-lint
     rev: v1.54.2
     hooks:
       - id: golangci-lint
-        args: [--timeout=5m, --verbose]
+        args: [--timeout=5m, --verbose, --enable-all]
+        types: [go]
+        files: \.go$
 
   - repo: https://github.com/psf/black
     rev: 23.7.0
     hooks:
       - id: black
         language_version: python3
+        files: \.py$
 
   - repo: https://github.com/pycqa/isort
     rev: 5.12.0
     hooks:
       - id: isort
         args: [--profile=black]
+        files: \.py$
 
   - repo: https://github.com/pre-commit/mirrors-eslint
     rev: v8.45.0
@@ -43,38 +52,154 @@ repos:
 
   - repo: local
     hooks:
-      - id: go-test
-        name: Run Go tests
-        entry: bash -c 'cd test && go test -v -timeout=30s ./integration_test.go'
+      - id: go-test-unit
+        name: Run Go unit tests
+        entry: bash -c 'cd test && go test -v -timeout=30s -run="^Test.*" ./comprehensive_integration_test.go'
         language: system
         pass_filenames: false
         always_run: true
+        stages: [pre-commit]
 
-      - id: go-build
+      - id: go-build-check
         name: Build Go application
-        entry: bash -c 'go build -o podinfo.exe .'
+        entry: bash -c 'go build -o podinfo.exe . && echo "Build successful"'
         language: system
         pass_filenames: false
         always_run: true
+        stages: [pre-commit]
 
-      - id: integration-test
-        name: Run integration tests
-        entry: bash -c 'cd test && ./run_integration_tests.sh'
+      - id: integration-test-quick
+        name: Run quick integration tests
+        entry: bash -c 'cd test && timeout 60s go test -v -timeout=30s -run="TestServerHealth|TestDelayJobCompletion" ./comprehensive_integration_test.go'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+
+      - id: integration-test-full
+        name: Run full integration tests
+        entry: bash -c 'cd test && timeout 300s go test -v -timeout=60s ./comprehensive_integration_test.go'
         language: system
         pass_filenames: false
         always_run: true
         stages: [pre-push]
 
       - id: security-scan
-        name: Security scan
-        entry: bash -c 'if command -v gosec >/dev/null 2>&1; then gosec ./...; else echo "gosec not installed, skipping security scan"; fi'
+        name: Security scan with gosec
+        entry: bash -c 'if command -v gosec >/dev/null 2>&1; then gosec -fmt json -out security-report.json ./...; else echo "gosec not installed, skipping security scan"; fi'
         language: system
         pass_filenames: false
         always_run: true
+        stages: [pre-push]
 
       - id: license-check
         name: Check license headers
-        entry: bash -c 'find . -name "*.go" -not -path "./vendor/*" -not -path "./.git/*" | xargs grep -L "Copyright" | head -10 | xargs -I {} echo "Missing license header: {}"'
+        entry: bash -c 'find . -name "*.go" -not -path "./vendor/*" -not -path "./.git/*" | head -10 | xargs grep -L "Copyright" | wc -l | xargs -I {} test {} -eq 0'
         language: system
         pass_filenames: false
         always_run: true
+        stages: [pre-commit]
+
+      - id: go-mod-tidy
+        name: Go mod tidy
+        entry: bash -c 'go mod tidy && git diff --exit-code go.mod go.sum'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+
+      - id: go-vet
+        name: Go vet
+        entry: bash -c 'go vet ./...'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+
+      - id: go-fmt
+        name: Go fmt
+        entry: bash -c 'go fmt ./... && git diff --exit-code'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+
+      - id: test-coverage
+        name: Test coverage check
+        entry: bash -c 'cd test && go test -coverprofile=coverage.out -covermode=atomic ./comprehensive_integration_test.go && go tool cover -func=coverage.out | tail -1'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+
+      - id: performance-test
+        name: Performance test
+        entry: bash -c 'cd test && timeout 120s go test -v -timeout=60s -run="TestPerformanceAndLoad" ./comprehensive_integration_test.go'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+
+      - id: race-condition-test
+        name: Race condition test
+        entry: bash -c 'cd test && timeout 120s go test -v -timeout=60s -race -run="TestRaceConditions" ./comprehensive_integration_test.go'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+
+      - id: memory-leak-test
+        name: Memory leak test
+        entry: bash -c 'cd test && timeout 180s go test -v -timeout=120s -run="TestConcurrentJobs" ./comprehensive_integration_test.go'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+
+      - id: api-consistency-test
+        name: API consistency test
+        entry: bash -c 'cd test && timeout 60s go test -v -timeout=30s -run="TestAPIConsistency" ./comprehensive_integration_test.go'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+
+      - id: error-handling-test
+        name: Error handling test
+        entry: bash -c 'cd test && timeout 60s go test -v -timeout=30s -run="TestErrorHandling" ./comprehensive_integration_test.go'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+
+      - id: frontend-lint
+        name: Frontend lint check
+        entry: bash -c 'if command -v htmlhint >/dev/null 2>&1; then htmlhint ui/*.html; else echo "htmlhint not installed, skipping frontend lint"; fi'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+
+      - id: documentation-check
+        name: Documentation check
+        entry: bash -c 'find . -name "*.md" -not -path "./.git/*" | xargs grep -l "TODO\|FIXME\|XXX" | wc -l | xargs -I {} test {} -eq 0'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+
+      - id: dependency-check
+        name: Dependency check
+        entry: bash -c 'go list -m all | grep -E "(v0\.|v1\.0\.0)" | wc -l | xargs -I {} test {} -eq 0'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+
+      - id: binary-size-check
+        name: Binary size check
+        entry: bash -c 'go build -o podinfo.exe . && ls -lh podinfo.exe | awk "{print \$5}" | sed "s/M//" | awk "{if(\$1 > 50) exit 1; else exit 0}"'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
