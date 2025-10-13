@@ -1,0 +1,342 @@
+---
+# ResourceQuota for Namespace
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: workload-demo-quota
+  namespace: workload-demo
+  labels:
+    resource-management: quota
+spec:
+  hard:
+    # Compute Resources
+    requests.cpu: "50"
+    requests.memory: 50Gi
+    limits.cpu: "100"
+    limits.memory: 100Gi
+
+    # Storage Resources
+    requests.storage: 500Gi
+    persistentvolumeclaims: "10"
+
+    # Object Counts
+    pods: "100"
+    services: "50"
+    services.loadbalancers: "5"
+    services.nodeports: "5"
+
+    # Workload Resources
+    replicationcontrollers: "20"
+    deployments.apps: "30"
+    statefulsets.apps: "10"
+    jobs.batch: "50"
+    cronjobs.batch: "20"
+
+    # Network Resources
+    configmaps: "50"
+    secrets: "50"
+
+  scopeSelector:
+    matchExpressions:
+    - operator: In
+      scopeName: PriorityClass
+      values:
+      - high-priority
+      - medium-priority
+      - low-priority
+---
+# ResourceQuota for Critical Workloads
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: critical-workload-quota
+  namespace: workload-demo
+  labels:
+    resource-management: quota
+    priority: critical
+spec:
+  hard:
+    requests.cpu: "20"
+    requests.memory: 20Gi
+    limits.cpu: "40"
+    limits.memory: 40Gi
+    pods: "30"
+  scopeSelector:
+    matchExpressions:
+    - operator: In
+      scopeName: PriorityClass
+      values:
+      - critical-priority
+---
+# ResourceQuota for Best Effort Workloads
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: best-effort-quota
+  namespace: workload-demo
+  labels:
+    resource-management: quota
+    priority: best-effort
+spec:
+  hard:
+    requests.cpu: "5"
+    requests.memory: 5Gi
+    limits.cpu: "10"
+    limits.memory: 10Gi
+    pods: "20"
+  scopeSelector:
+    matchExpressions:
+    - operator: In
+      scopeName: PriorityClass
+      values:
+      - best-effort-priority
+---
+# LimitRange for Container Resources
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: container-limits
+  namespace: workload-demo
+  labels:
+    resource-management: limit-range
+spec:
+  limits:
+  # Container Defaults
+  - type: Container
+    default:
+      cpu: 500m
+      memory: 512Mi
+    defaultRequest:
+      cpu: 100m
+      memory: 128Mi
+    max:
+      cpu: 4000m
+      memory: 8Gi
+    min:
+      cpu: 10m
+      memory: 16Mi
+    maxLimitRequestRatio:
+      cpu: 10
+      memory: 8
+---
+# LimitRange for Pod Resources
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: pod-limits
+  namespace: workload-demo
+  labels:
+    resource-management: limit-range
+spec:
+  limits:
+  - type: Pod
+    max:
+      cpu: 8000m
+      memory: 16Gi
+    min:
+      cpu: 10m
+      memory: 16Mi
+---
+# LimitRange for PVC Storage
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: pvc-limits
+  namespace: workload-demo
+  labels:
+    resource-management: limit-range
+spec:
+  limits:
+  - type: PersistentVolumeClaim
+    max:
+      storage: 100Gi
+    min:
+      storage: 1Gi
+---
+# Example Deployment with Resource Quotas Applied
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: quota-demo-app
+  namespace: workload-demo
+  labels:
+    app: quota-demo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: quota-demo
+  template:
+    metadata:
+      labels:
+        app: quota-demo
+    spec:
+      priorityClassName: medium-priority
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 2000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: app
+        image: ghcr.io/stefanprodan/podinfo:6.9.2
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL
+        ports:
+        - name: http
+          containerPort: 9898
+          protocol: TCP
+        command:
+        - ./podinfo
+        - --port=9898
+        - --level=info
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 9898
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 9898
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        # Resources must fit within LimitRange
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+          requests:
+            cpu: 250m
+            memory: 256Mi
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: tmp
+        emptyDir:
+          sizeLimit: 1Gi
+      - name: data
+        emptyDir:
+          sizeLimit: 2Gi
+---
+# Network Policy to Control Traffic
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: workload-network-policy
+  namespace: workload-demo
+  labels:
+    resource-management: network-policy
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow intra-namespace communication
+  - from:
+    - podSelector: {}
+    ports:
+    - protocol: TCP
+      port: 9898
+    - protocol: TCP
+      port: 6379
+    - protocol: TCP
+      port: 5432
+  # Allow from ingress namespace
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+  egress:
+  # Allow DNS
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+  # Allow intra-namespace
+  - to:
+    - podSelector: {}
+    ports:
+    - protocol: TCP
+      port: 9898
+    - protocol: TCP
+      port: 6379
+    - protocol: TCP
+      port: 5432
+  # Allow external HTTPS
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: TCP
+      port: 443
+---
+# Monitoring ResourceQuota Status
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: quota-monitoring
+  namespace: workload-demo
+  labels:
+    resource-management: monitoring
+data:
+  check-quotas.sh: |
+    #!/bin/bash
+    # Script to check resource quota usage
+
+    echo "=== Resource Quota Status ==="
+    kubectl get resourcequota -n workload-demo
+
+    echo ""
+    echo "=== Detailed Quota Usage ==="
+    kubectl describe resourcequota -n workload-demo
+
+    echo ""
+    echo "=== LimitRange Configuration ==="
+    kubectl get limitrange -n workload-demo
+
+    echo ""
+    echo "=== Pod Resource Usage ==="
+    kubectl top pods -n workload-demo
+
+    echo ""
+    echo "=== Node Resource Usage ==="
+    kubectl top nodes
+
+  alert-quota-exceeded.sh: |
+    #!/bin/bash
+    # Alert when quota is exceeded
+
+    NAMESPACE="workload-demo"
+    THRESHOLD=80
+
+    # Get quota usage percentage
+    USAGE=$(kubectl get resourcequota -n $NAMESPACE -o json | \
+            jq -r '.items[0].status.used."requests.cpu"' | \
+            sed 's/[^0-9]//g')
+
+    LIMIT=$(kubectl get resourcequota -n $NAMESPACE -o json | \
+            jq -r '.items[0].spec.hard."requests.cpu"' | \
+            sed 's/[^0-9]//g')
+
+    PERCENT=$((USAGE * 100 / LIMIT))
+
+    if [ $PERCENT -gt $THRESHOLD ]; then
+      echo "WARNING: CPU quota at ${PERCENT}% of limit"
+      # Send alert (implement your alerting mechanism)
+    fi

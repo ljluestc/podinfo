@@ -1,0 +1,619 @@
+---
+# Distributed Tracing Configuration
+# This file configures Jaeger integration with Istio for end-to-end
+# request tracing and performance analysis across the service mesh.
+
+# Namespace for observability components
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+  labels:
+    name: observability
+    istio-injection: enabled
+
+---
+# Jaeger Operator Installation
+# Install via:
+# kubectl create namespace observability
+# kubectl create -f https://github.com/jaegertracing/jaeger-operator/releases/download/v1.51.0/jaeger-operator.yaml -n observability
+
+# Jaeger All-in-One for Development
+# For production, use the production deployment below
+apiVersion: jaegertracing.io/v1
+kind: Jaeger
+metadata:
+  name: jaeger-dev
+  namespace: observability
+spec:
+  strategy: allInOne
+  allInOne:
+    image: jaegertracing/all-in-one:1.51
+    options:
+      log-level: info
+      query:
+        base-path: /jaeger
+  storage:
+    type: memory
+    options:
+      memory:
+        max-traces: 100000
+  ingress:
+    enabled: false
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "14269"
+
+---
+# Jaeger Production Deployment
+# Separate collector, query, and storage for high availability
+apiVersion: jaegertracing.io/v1
+kind: Jaeger
+metadata:
+  name: jaeger-prod
+  namespace: observability
+spec:
+  strategy: production
+
+  # Collector configuration
+  collector:
+    replicas: 3
+    maxReplicas: 5
+    resources:
+      requests:
+        cpu: 200m
+        memory: 256Mi
+      limits:
+        cpu: 1000m
+        memory: 1Gi
+    options:
+      log-level: info
+      collector:
+        zipkin:
+          host-port: ":9411"
+        otlp:
+          enabled: true
+          grpc:
+            host-port: ":4317"
+          http:
+            host-port: ":4318"
+    affinity:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: jaeger-collector
+          topologyKey: kubernetes.io/hostname
+
+  # Query service configuration
+  query:
+    replicas: 2
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    options:
+      log-level: info
+      query:
+        base-path: /jaeger
+        max-clock-skew-adjustment: 30s
+    affinity:
+      podAntiAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: jaeger-query
+          topologyKey: kubernetes.io/hostname
+
+  # Storage configuration (Elasticsearch)
+  storage:
+    type: elasticsearch
+    options:
+      es:
+        server-urls: http://elasticsearch.observability.svc.cluster.local:9200
+        username: elastic
+        password: changeme
+        index-prefix: jaeger
+        tls:
+          enabled: false
+        num-shards: 3
+        num-replicas: 1
+    esIndexCleaner:
+      enabled: true
+      numberOfDays: 7
+      schedule: "55 23 * * *"
+      image: jaegertracing/jaeger-es-index-cleaner:1.51
+
+  # Agent configuration (deprecated, using OTLP instead)
+  agent:
+    strategy: DaemonSet
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 128Mi
+
+  # Ingress configuration
+  ingress:
+    enabled: true
+    annotations:
+      kubernetes.io/ingress.class: nginx
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+    hosts:
+    - jaeger.example.com
+    tls:
+    - secretName: jaeger-tls
+      hosts:
+      - jaeger.example.com
+
+  # Volume mounts for custom configurations
+  volumeMounts:
+  - name: sampling-config
+    mountPath: /etc/jaeger/sampling
+
+  volumes:
+  - name: sampling-config
+    configMap:
+      name: jaeger-sampling-config
+
+---
+# Elasticsearch for Jaeger backend storage
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: elasticsearch
+  namespace: observability
+spec:
+  serviceName: elasticsearch
+  replicas: 3
+  selector:
+    matchLabels:
+      app: elasticsearch
+  template:
+    metadata:
+      labels:
+        app: elasticsearch
+    spec:
+      initContainers:
+      - name: configure-sysctl
+        image: busybox:1.36
+        command:
+        - sh
+        - -c
+        - |
+          sysctl -w vm.max_map_count=262144
+        securityContext:
+          privileged: true
+      containers:
+      - name: elasticsearch
+        image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+        env:
+        - name: cluster.name
+          value: "jaeger-cluster"
+        - name: discovery.type
+          value: "single-node"
+        - name: ES_JAVA_OPTS
+          value: "-Xms512m -Xmx512m"
+        - name: xpack.security.enabled
+          value: "false"
+        ports:
+        - containerPort: 9200
+          name: http
+        - containerPort: 9300
+          name: transport
+        resources:
+          requests:
+            memory: 1Gi
+            cpu: 500m
+          limits:
+            memory: 2Gi
+            cpu: 1000m
+        volumeMounts:
+        - name: elasticsearch-data
+          mountPath: /usr/share/elasticsearch/data
+  volumeClaimTemplates:
+  - metadata:
+      name: elasticsearch-data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: standard
+      resources:
+        requests:
+          storage: 50Gi
+
+---
+# Elasticsearch Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+  namespace: observability
+spec:
+  type: ClusterIP
+  selector:
+    app: elasticsearch
+  ports:
+  - port: 9200
+    name: http
+  - port: 9300
+    name: transport
+
+---
+# Jaeger Sampling Configuration
+# Adaptive sampling based on service load
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jaeger-sampling-config
+  namespace: observability
+data:
+  sampling.json: |
+    {
+      "default_strategy": {
+        "type": "probabilistic",
+        "param": 1.0
+      },
+      "service_strategies": [
+        {
+          "service": "podinfo",
+          "type": "probabilistic",
+          "param": 1.0,
+          "operation_strategies": [
+            {
+              "operation": "GET /healthz",
+              "type": "probabilistic",
+              "param": 0.1
+            },
+            {
+              "operation": "GET /metrics",
+              "type": "probabilistic",
+              "param": 0.01
+            }
+          ]
+        },
+        {
+          "service": "podinfo-canary",
+          "type": "probabilistic",
+          "param": 1.0
+        }
+      ]
+    }
+
+---
+# Telemetry Configuration for Tracing
+apiVersion: telemetry.istio.io/v1alpha1
+kind: Telemetry
+metadata:
+  name: tracing-config
+  namespace: istio-system
+spec:
+  tracing:
+  - providers:
+    - name: jaeger
+    customTags:
+      environment:
+        literal:
+          value: production
+      cluster_name:
+        literal:
+          value: kubernetes-security-cluster
+      pod_name:
+        environment:
+          name: POD_NAME
+      namespace:
+        environment:
+          name: POD_NAMESPACE
+      cluster_id:
+        literal:
+          value: cluster-1
+    randomSamplingPercentage: 100.0
+    disableSpanReporting: false
+
+---
+# Telemetry for podinfo namespace with custom sampling
+apiVersion: telemetry.istio.io/v1alpha1
+kind: Telemetry
+metadata:
+  name: podinfo-tracing
+  namespace: podinfo
+spec:
+  tracing:
+  - providers:
+    - name: jaeger
+    customTags:
+      app_version:
+        literal:
+          value: "6.9.2"
+      deployment_type:
+        literal:
+          value: canary
+      request_id:
+        header:
+          name: x-request-id
+      user_agent:
+        header:
+          name: user-agent
+    randomSamplingPercentage: 100.0
+
+---
+# OpenTelemetry Collector for advanced telemetry
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: observability
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+      zipkin:
+        endpoint: 0.0.0.0:9411
+      jaeger:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:14250
+          thrift_http:
+            endpoint: 0.0.0.0:14268
+
+    processors:
+      batch:
+        timeout: 10s
+        send_batch_size: 1024
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 512
+      resource:
+        attributes:
+        - key: cluster.name
+          value: kubernetes-security-cluster
+          action: upsert
+      attributes:
+        actions:
+        - key: environment
+          value: production
+          action: upsert
+
+    exporters:
+      jaeger:
+        endpoint: jaeger-collector.observability.svc.cluster.local:14250
+        tls:
+          insecure: true
+      prometheus:
+        endpoint: "0.0.0.0:8889"
+      logging:
+        loglevel: info
+
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp, zipkin, jaeger]
+          processors: [memory_limiter, batch, resource, attributes]
+          exporters: [jaeger, logging]
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [prometheus, logging]
+
+---
+# OpenTelemetry Collector Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: observability
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8889"
+    spec:
+      containers:
+      - name: otel-collector
+        image: otel/opentelemetry-collector-contrib:0.91.0
+        args:
+        - --config=/etc/otel/config.yaml
+        ports:
+        - containerPort: 4317  # OTLP gRPC
+          name: otlp-grpc
+        - containerPort: 4318  # OTLP HTTP
+          name: otlp-http
+        - containerPort: 9411  # Zipkin
+          name: zipkin
+        - containerPort: 14250 # Jaeger gRPC
+          name: jaeger-grpc
+        - containerPort: 14268 # Jaeger HTTP
+          name: jaeger-http
+        - containerPort: 8889  # Prometheus metrics
+          name: metrics
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        volumeMounts:
+        - name: config
+          mountPath: /etc/otel
+      volumes:
+      - name: config
+        configMap:
+          name: otel-collector-config
+
+---
+# OpenTelemetry Collector Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: observability
+  labels:
+    app: otel-collector
+spec:
+  type: ClusterIP
+  selector:
+    app: otel-collector
+  ports:
+  - name: otlp-grpc
+    port: 4317
+    targetPort: 4317
+  - name: otlp-http
+    port: 4318
+    targetPort: 4318
+  - name: zipkin
+    port: 9411
+    targetPort: 9411
+  - name: jaeger-grpc
+    port: 14250
+    targetPort: 14250
+  - name: jaeger-http
+    port: 14268
+    targetPort: 14268
+  - name: metrics
+    port: 8889
+    targetPort: 8889
+
+---
+# ServiceMonitor for Jaeger metrics
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: jaeger-metrics
+  namespace: observability
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: jaeger
+  endpoints:
+  - port: admin-http
+    interval: 30s
+    path: /metrics
+
+---
+# ServiceMonitor for OpenTelemetry Collector
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: otel-collector-metrics
+  namespace: observability
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: otel-collector
+  endpoints:
+  - port: metrics
+    interval: 30s
+
+---
+# EnvoyFilter for custom tracing headers
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: custom-tracing-headers
+  namespace: istio-system
+spec:
+  configPatches:
+  - applyTo: HTTP_FILTER
+    match:
+      context: SIDECAR_INBOUND
+      listener:
+        filterChain:
+          filter:
+            name: envoy.filters.network.http_connection_manager
+            subFilter:
+              name: envoy.filters.http.router
+    patch:
+      operation: INSERT_BEFORE
+      value:
+        name: envoy.filters.http.lua
+        typed_config:
+          '@type': type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua
+          inline_code: |
+            function envoy_on_request(request_handle)
+              -- Add custom request headers for tracing
+              request_handle:headers():add("x-trace-timestamp", os.time())
+              request_handle:headers():add("x-trace-host", request_handle:headers():get(":authority"))
+            end
+
+            function envoy_on_response(response_handle)
+              -- Add custom response headers for tracing
+              response_handle:headers():add("x-trace-response-time", os.time())
+            end
+
+---
+# Grafana Dashboard for Distributed Tracing
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jaeger-grafana-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  jaeger-tracing.json: |
+    {
+      "dashboard": {
+        "title": "Service Mesh Distributed Tracing",
+        "tags": ["istio", "jaeger", "tracing"],
+        "timezone": "browser",
+        "panels": [
+          {
+            "title": "Request Rate by Service",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "sum(rate(istio_requests_total[5m])) by (destination_service_name)"
+              }
+            ]
+          },
+          {
+            "title": "P95 Latency by Service",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "histogram_quantile(0.95, sum(rate(istio_request_duration_milliseconds_bucket[5m])) by (le, destination_service_name))"
+              }
+            ]
+          },
+          {
+            "title": "Error Rate",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "sum(rate(istio_requests_total{response_code=~\"5..\"}[5m])) by (destination_service_name)"
+              }
+            ]
+          },
+          {
+            "title": "Trace Span Count",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "sum(jaeger_spans_received_total)"
+              }
+            ]
+          }
+        ]
+      }
+    }

@@ -1,0 +1,613 @@
+---
+# SLO (Service Level Objective) Configuration
+# Implements SLO tracking and error budget alerting
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: slo-definitions
+  namespace: monitoring
+  labels:
+    app: prometheus
+    component: slo
+data:
+  slo-config.yaml: |
+    # SLO Definitions
+    # Format: service, SLI (Service Level Indicator), SLO target, time window
+
+    services:
+      # API Server SLOs
+      - name: kubernetes-apiserver
+        slos:
+          - name: availability
+            description: "API Server availability SLO"
+            objective: 99.9  # 99.9% availability
+            sli_type: availability
+            time_window: 30d
+            error_budget: 0.1  # 0.1% error budget (43.2 minutes per month)
+            query: |
+              (
+                sum(rate(apiserver_request_total{code!~"5.."}[5m]))
+                /
+                sum(rate(apiserver_request_total[5m]))
+              ) * 100
+
+          - name: latency
+            description: "API Server latency SLO"
+            objective: 95  # 95% of requests < 1s
+            sli_type: latency
+            time_window: 30d
+            threshold: 1s
+            query: |
+              histogram_quantile(0.95,
+                sum(rate(apiserver_request_duration_seconds_bucket{verb!~"WATCH|CONNECT"}[5m])) by (le)
+              )
+
+      # Application SLOs
+      - name: application-frontend
+        slos:
+          - name: availability
+            description: "Frontend availability"
+            objective: 99.5  # 99.5% availability
+            sli_type: availability
+            time_window: 30d
+            error_budget: 0.5
+            query: |
+              (
+                sum(rate(http_requests_total{job="frontend",code!~"5.."}[5m]))
+                /
+                sum(rate(http_requests_total{job="frontend"}[5m]))
+              ) * 100
+
+          - name: latency
+            description: "Frontend response time"
+            objective: 95  # 95% < 500ms
+            sli_type: latency
+            time_window: 30d
+            threshold: 0.5s
+            query: |
+              histogram_quantile(0.95,
+                sum(rate(http_request_duration_seconds_bucket{job="frontend"}[5m])) by (le)
+              )
+
+      - name: application-backend
+        slos:
+          - name: availability
+            description: "Backend API availability"
+            objective: 99.9
+            sli_type: availability
+            time_window: 30d
+            error_budget: 0.1
+            query: |
+              (
+                sum(rate(http_requests_total{job="backend",code!~"5.."}[5m]))
+                /
+                sum(rate(http_requests_total{job="backend"}[5m]))
+              ) * 100
+
+          - name: latency
+            description: "Backend API latency"
+            objective: 99  # 99% < 100ms
+            sli_type: latency
+            time_window: 30d
+            threshold: 0.1s
+            query: |
+              histogram_quantile(0.99,
+                sum(rate(http_request_duration_seconds_bucket{job="backend"}[5m])) by (le)
+              )
+
+      # Database SLOs
+      - name: database
+        slos:
+          - name: availability
+            description: "Database availability"
+            objective: 99.99
+            sli_type: availability
+            time_window: 30d
+            error_budget: 0.01
+            query: |
+              avg(up{job="postgres"}) * 100
+
+          - name: query-latency
+            description: "Database query latency"
+            objective: 95  # 95% < 50ms
+            sli_type: latency
+            time_window: 30d
+            threshold: 0.05s
+            query: |
+              histogram_quantile(0.95,
+                sum(rate(pg_stat_statements_duration_bucket[5m])) by (le)
+              )
+
+---
+# SLO Recording Rules
+# Pre-computed metrics for efficient SLO tracking
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: slo-recording-rules
+  namespace: monitoring
+  labels:
+    prometheus: kube-prometheus
+spec:
+  groups:
+  # API Server SLO Recording Rules
+  - name: apiserver-slo-recording
+    interval: 30s
+    rules:
+    # Availability SLI
+    - record: apiserver:availability:ratio_rate5m
+      expr: |
+        sum(rate(apiserver_request_total{code!~"5.."}[5m]))
+        /
+        sum(rate(apiserver_request_total[5m]))
+
+    - record: apiserver:availability:ratio_rate30m
+      expr: |
+        sum(rate(apiserver_request_total{code!~"5.."}[30m]))
+        /
+        sum(rate(apiserver_request_total[30m]))
+
+    - record: apiserver:availability:ratio_rate1h
+      expr: |
+        sum(rate(apiserver_request_total{code!~"5.."}[1h]))
+        /
+        sum(rate(apiserver_request_total[1h]))
+
+    - record: apiserver:availability:ratio_rate6h
+      expr: |
+        sum(rate(apiserver_request_total{code!~"5.."}[6h]))
+        /
+        sum(rate(apiserver_request_total[6h]))
+
+    - record: apiserver:availability:ratio_rate1d
+      expr: |
+        sum(rate(apiserver_request_total{code!~"5.."}[1d]))
+        /
+        sum(rate(apiserver_request_total[1d]))
+
+    - record: apiserver:availability:ratio_rate3d
+      expr: |
+        sum(rate(apiserver_request_total{code!~"5.."}[3d]))
+        /
+        sum(rate(apiserver_request_total[3d]))
+
+    # Latency SLI
+    - record: apiserver:latency:p95_rate5m
+      expr: |
+        histogram_quantile(0.95,
+          sum(rate(apiserver_request_duration_seconds_bucket{verb!~"WATCH|CONNECT"}[5m])) by (le)
+        )
+
+    - record: apiserver:latency:p99_rate5m
+      expr: |
+        histogram_quantile(0.99,
+          sum(rate(apiserver_request_duration_seconds_bucket{verb!~"WATCH|CONNECT"}[5m])) by (le)
+        )
+
+    # Error budget calculation
+    - record: apiserver:error_budget:remaining
+      expr: |
+        1 - (
+          (1 - apiserver:availability:ratio_rate30d)
+          /
+          (1 - 0.999)
+        )
+
+  # Application SLO Recording Rules
+  - name: application-slo-recording
+    interval: 30s
+    rules:
+    # Frontend availability
+    - record: frontend:availability:ratio_rate5m
+      expr: |
+        sum(rate(http_requests_total{job="frontend",code!~"5.."}[5m]))
+        /
+        sum(rate(http_requests_total{job="frontend"}[5m]))
+
+    - record: frontend:availability:ratio_rate1h
+      expr: |
+        sum(rate(http_requests_total{job="frontend",code!~"5.."}[1h]))
+        /
+        sum(rate(http_requests_total{job="frontend"}[1h]))
+
+    - record: frontend:availability:ratio_rate1d
+      expr: |
+        sum(rate(http_requests_total{job="frontend",code!~"5.."}[1d]))
+        /
+        sum(rate(http_requests_total{job="frontend"}[1d]))
+
+    # Backend availability
+    - record: backend:availability:ratio_rate5m
+      expr: |
+        sum(rate(http_requests_total{job="backend",code!~"5.."}[5m]))
+        /
+        sum(rate(http_requests_total{job="backend"}[5m]))
+
+    - record: backend:availability:ratio_rate1h
+      expr: |
+        sum(rate(http_requests_total{job="backend",code!~"5.."}[1h]))
+        /
+        sum(rate(http_requests_total{job="backend"}[1h]))
+
+    - record: backend:availability:ratio_rate1d
+      expr: |
+        sum(rate(http_requests_total{job="backend",code!~"5.."}[1d]))
+        /
+        sum(rate(http_requests_total{job="backend"}[1d]))
+
+    # Latency
+    - record: frontend:latency:p95_rate5m
+      expr: |
+        histogram_quantile(0.95,
+          sum(rate(http_request_duration_seconds_bucket{job="frontend"}[5m])) by (le)
+        )
+
+    - record: backend:latency:p99_rate5m
+      expr: |
+        histogram_quantile(0.99,
+          sum(rate(http_request_duration_seconds_bucket{job="backend"}[5m])) by (le)
+        )
+
+---
+# SLO Alert Rules - Multi-window, multi-burn-rate
+# Based on Google SRE Workbook methodology
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: slo-alert-rules
+  namespace: monitoring
+  labels:
+    prometheus: kube-prometheus
+spec:
+  groups:
+  # Fast burn alerts - Critical
+  - name: slo-fast-burn
+    interval: 30s
+    rules:
+    # API Server - Fast burn (exhausts 2% budget in 1 hour)
+    - alert: APIServerSLOFastBurn
+      expr: |
+        (
+          apiserver:availability:ratio_rate5m < 0.999
+          and
+          apiserver:availability:ratio_rate1h < 0.999
+        )
+      for: 2m
+      labels:
+        severity: critical
+        category: infrastructure
+        type: slo
+        service: apiserver
+        slo: availability
+        burn_rate: fast
+      annotations:
+        summary: "API Server SLO fast burn detected"
+        description: "Error budget is being consumed rapidly. Current availability: {{ $value | humanizePercentage }}"
+        threshold: "99.9%"
+        current_value: "{{ $value | humanizePercentage }}"
+        runbook_url: "https://runbooks.example.com/slo-fast-burn"
+
+    # Frontend - Fast burn
+    - alert: FrontendSLOFastBurn
+      expr: |
+        (
+          frontend:availability:ratio_rate5m < 0.995
+          and
+          frontend:availability:ratio_rate1h < 0.995
+        )
+      for: 2m
+      labels:
+        severity: critical
+        category: application
+        type: slo
+        service: frontend
+        slo: availability
+        burn_rate: fast
+      annotations:
+        summary: "Frontend SLO fast burn"
+        description: "Frontend error budget burning fast. Availability: {{ $value | humanizePercentage }}"
+
+    # Backend - Fast burn
+    - alert: BackendSLOFastBurn
+      expr: |
+        (
+          backend:availability:ratio_rate5m < 0.999
+          and
+          backend:availability:ratio_rate1h < 0.999
+        )
+      for: 2m
+      labels:
+        severity: critical
+        category: application
+        type: slo
+        service: backend
+        slo: availability
+        burn_rate: fast
+      annotations:
+        summary: "Backend SLO fast burn"
+        description: "Backend error budget burning fast. Availability: {{ $value | humanizePercentage }}"
+
+  # Slow burn alerts - Warning
+  - name: slo-slow-burn
+    interval: 1m
+    rules:
+    # API Server - Slow burn (exhausts budget in 30 days)
+    - alert: APIServerSLOSlowBurn
+      expr: |
+        (
+          apiserver:availability:ratio_rate1d < 0.9995
+          and
+          apiserver:availability:ratio_rate3d < 0.9995
+        )
+      for: 15m
+      labels:
+        severity: warning
+        category: infrastructure
+        type: slo
+        service: apiserver
+        slo: availability
+        burn_rate: slow
+      annotations:
+        summary: "API Server SLO slow burn"
+        description: "Error budget trending towards exhaustion. 24h availability: {{ $value | humanizePercentage }}"
+
+    # Frontend - Slow burn
+    - alert: FrontendSLOSlowBurn
+      expr: |
+        (
+          frontend:availability:ratio_rate1d < 0.9975
+          and
+          frontend:availability:ratio_rate3d < 0.9975
+        )
+      for: 15m
+      labels:
+        severity: warning
+        category: application
+        type: slo
+        service: frontend
+        slo: availability
+        burn_rate: slow
+      annotations:
+        summary: "Frontend SLO slow burn"
+        description: "Frontend error budget trending down. 24h availability: {{ $value | humanizePercentage }}"
+
+    # Backend - Slow burn
+    - alert: BackendSLOSlowBurn
+      expr: |
+        (
+          backend:availability:ratio_rate1d < 0.9995
+          and
+          backend:availability:ratio_rate3d < 0.9995
+        )
+      for: 15m
+      labels:
+        severity: warning
+        category: application
+        type: slo
+        service: backend
+        slo: availability
+        burn_rate: slow
+      annotations:
+        summary: "Backend SLO slow burn"
+        description: "Backend error budget trending down. 24h availability: {{ $value | humanizePercentage }}"
+
+  # Latency SLO alerts
+  - name: slo-latency
+    interval: 30s
+    rules:
+    - alert: APIServerLatencySLOBreach
+      expr: apiserver:latency:p95_rate5m > 1
+      for: 5m
+      labels:
+        severity: warning
+        category: infrastructure
+        type: slo
+        service: apiserver
+        slo: latency
+      annotations:
+        summary: "API Server latency SLO breach"
+        description: "95th percentile latency is {{ $value }}s, exceeding 1s threshold"
+
+    - alert: FrontendLatencySLOBreach
+      expr: frontend:latency:p95_rate5m > 0.5
+      for: 5m
+      labels:
+        severity: warning
+        category: application
+        type: slo
+        service: frontend
+        slo: latency
+      annotations:
+        summary: "Frontend latency SLO breach"
+        description: "95th percentile latency is {{ $value }}s, exceeding 500ms threshold"
+
+    - alert: BackendLatencySLOBreach
+      expr: backend:latency:p99_rate5m > 0.1
+      for: 5m
+      labels:
+        severity: warning
+        category: application
+        type: slo
+        service: backend
+        slo: latency
+      annotations:
+        summary: "Backend latency SLO breach"
+        description: "99th percentile latency is {{ $value }}s, exceeding 100ms threshold"
+
+  # Error budget exhaustion
+  - name: slo-error-budget
+    interval: 5m
+    rules:
+    - alert: ErrorBudgetNearExhaustion
+      expr: |
+        (
+          sum(increase(http_requests_total{code=~"5.."}[7d]))
+          /
+          sum(increase(http_requests_total[7d]))
+        ) > 0.0008
+      for: 1h
+      labels:
+        severity: warning
+        category: application
+        type: slo
+      annotations:
+        summary: "Error budget near exhaustion"
+        description: "80% of monthly error budget consumed. Current error rate: {{ $value | humanizePercentage }}"
+        error_budget: "20% remaining"
+
+    - alert: ErrorBudgetExhausted
+      expr: |
+        (
+          sum(increase(http_requests_total{code=~"5.."}[7d]))
+          /
+          sum(increase(http_requests_total[7d]))
+        ) > 0.001
+      for: 30m
+      labels:
+        severity: critical
+        category: application
+        type: slo
+      annotations:
+        summary: "Error budget exhausted"
+        description: "Monthly error budget exhausted. No budget for additional errors. Current rate: {{ $value | humanizePercentage }}"
+        error_budget: "0% remaining"
+        runbook_url: "https://runbooks.example.com/error-budget-exhausted"
+
+---
+# Grafana Dashboard for SLO tracking
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: slo-dashboards
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  slo-dashboard.json: |
+    {
+      "dashboard": {
+        "title": "SLO Dashboard",
+        "tags": ["slo", "sli", "error-budget"],
+        "timezone": "browser",
+        "panels": [
+          {
+            "title": "API Server Availability SLO",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "apiserver:availability:ratio_rate5m * 100",
+                "legendFormat": "5m window"
+              },
+              {
+                "expr": "apiserver:availability:ratio_rate1h * 100",
+                "legendFormat": "1h window"
+              },
+              {
+                "expr": "apiserver:availability:ratio_rate1d * 100",
+                "legendFormat": "1d window"
+              }
+            ],
+            "yaxes": [
+              {
+                "format": "percent",
+                "min": 99,
+                "max": 100
+              }
+            ],
+            "alert": {
+              "name": "API Server SLO",
+              "conditions": [
+                {
+                  "evaluator": {
+                    "params": [99.9],
+                    "type": "lt"
+                  },
+                  "operator": {
+                    "type": "and"
+                  },
+                  "query": {
+                    "params": ["A", "5m", "now"]
+                  },
+                  "type": "query"
+                }
+              ]
+            }
+          },
+          {
+            "title": "Error Budget Remaining",
+            "type": "gauge",
+            "targets": [
+              {
+                "expr": "apiserver:error_budget:remaining * 100"
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {
+                "unit": "percent",
+                "min": 0,
+                "max": 100,
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {"value": 0, "color": "red"},
+                    {"value": 20, "color": "orange"},
+                    {"value": 50, "color": "green"}
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "title": "Request Rate",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "sum(rate(apiserver_request_total[5m]))",
+                "legendFormat": "Total requests/s"
+              },
+              {
+                "expr": "sum(rate(apiserver_request_total{code=~\"5..\"}[5m]))",
+                "legendFormat": "Error requests/s"
+              }
+            ]
+          },
+          {
+            "title": "Latency Percentiles",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "apiserver:latency:p95_rate5m",
+                "legendFormat": "p95"
+              },
+              {
+                "expr": "apiserver:latency:p99_rate5m",
+                "legendFormat": "p99"
+              }
+            ],
+            "yaxes": [
+              {
+                "format": "s"
+              }
+            ]
+          },
+          {
+            "title": "SLO Compliance (30 days)",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "(apiserver:availability:ratio_rate30d >= 0.999) * 100"
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {
+                "unit": "percent",
+                "mappings": [
+                  {"value": 100, "text": "✓ Compliant", "color": "green"},
+                  {"value": 0, "text": "✗ Breach", "color": "red"}
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }

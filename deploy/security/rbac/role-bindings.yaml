@@ -1,0 +1,257 @@
+# RoleBindings and ClusterRoleBindings
+# Maps users, groups, and service accounts to roles
+
+---
+# ClusterRoleBinding: Platform Admins
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: platform-admins
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: platform-admin
+subjects:
+# OIDC group mapping
+- kind: Group
+  name: oidc:platform-admins
+  apiGroup: rbac.authorization.k8s.io
+# Individual users
+- kind: User
+  name: oidc:admin@example.com
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ClusterRoleBinding: Developers (cluster-wide read, namespace-specific write)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: developers-readonly
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: developer-readonly
+subjects:
+- kind: Group
+  name: oidc:developers
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ClusterRoleBinding: Viewers
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: viewers
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: viewer
+subjects:
+- kind: Group
+  name: oidc:viewers
+  apiGroup: rbac.authorization.k8s.io
+- kind: User
+  name: oidc:viewer@example.com
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ClusterRoleBinding: Operators
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: operators
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: operator
+subjects:
+- kind: Group
+  name: oidc:operators
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ClusterRoleBinding: Security Auditors
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: security-auditors
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: security-auditor
+subjects:
+- kind: Group
+  name: oidc:security-auditors
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ClusterRoleBinding: Monitoring Systems
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: monitoring-systems
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: monitoring
+subjects:
+# Prometheus service account
+- kind: ServiceAccount
+  name: prometheus
+  namespace: monitoring
+# Grafana service account
+- kind: ServiceAccount
+  name: grafana
+  namespace: monitoring
+
+---
+# ClusterRoleBinding: CI/CD Deployers
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cicd-deployers
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cicd-deployer
+subjects:
+# ArgoCD service account
+- kind: ServiceAccount
+  name: argocd-application-controller
+  namespace: argocd
+# GitHub Actions runner (if self-hosted)
+- kind: ServiceAccount
+  name: github-actions-runner
+  namespace: ci-cd
+
+---
+# RoleBinding: Developers in dev namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: developers
+  namespace: dev
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: app-developer
+subjects:
+- kind: Group
+  name: oidc:developers
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# RoleBinding: Developers in staging namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: developers
+  namespace: staging
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: app-developer
+subjects:
+- kind: Group
+  name: oidc:developers
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# RoleBinding: Operators in production namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: operators
+  namespace: production
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: app-operator
+subjects:
+- kind: Group
+  name: oidc:operators
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# RoleBinding: Service Account for application
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: podinfo-app
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: readonly-user
+subjects:
+- kind: ServiceAccount
+  name: podinfo
+  namespace: default
+
+---
+# RoleBinding: Secret access for specific service account
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: app-secret-reader
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: secret-reader
+subjects:
+- kind: ServiceAccount
+  name: podinfo
+  namespace: default
+
+---
+# RoleBinding: Debug access (time-limited, requires approval)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: debug-access-temporary
+  namespace: production
+  annotations:
+    description: "Temporary debug access - expires after 1 hour"
+    expires: "2025-10-12T13:00:00Z"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: debug-access
+subjects:
+- kind: User
+  name: oidc:developer@example.com
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ClusterRoleBinding: System components (least privilege)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: system:node
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:node
+subjects:
+- kind: Group
+  name: system:nodes
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Emergency Break-Glass Binding (requires manual approval)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: emergency-admin-binding
+  annotations:
+    description: "Emergency break-glass access - requires security team approval"
+    approval-required: "true"
+    audit-required: "true"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: emergency-admin
+subjects:
+# Deliberately empty - must be added manually during emergency
+[]

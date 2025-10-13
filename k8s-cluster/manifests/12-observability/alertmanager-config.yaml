@@ -1,0 +1,489 @@
+---
+# Alertmanager Configuration
+# This configures alert routing, grouping, and notification channels
+apiVersion: v1
+kind: Secret
+metadata:
+  name: alertmanager-config
+  namespace: monitoring
+type: Opaque
+stringData:
+  alertmanager.yaml: |
+    global:
+      resolve_timeout: 5m
+      # Slack configuration
+      slack_api_url: '${SLACK_WEBHOOK_URL}'
+      # PagerDuty configuration
+      pagerduty_url: 'https://events.pagerduty.com/v2/enqueue'
+
+    # Template files for notifications
+    templates:
+    - '/etc/alertmanager/templates/*.tmpl'
+
+    # Routing tree for alerts
+    route:
+      receiver: 'default-receiver'
+      group_by: ['alertname', 'cluster', 'service', 'severity']
+      group_wait: 30s          # Wait time before sending initial notification
+      group_interval: 5m       # Wait time before sending updates about new alerts in a group
+      repeat_interval: 4h      # Wait time before resending a notification
+
+      routes:
+      # Critical alerts - immediate PagerDuty notification
+      - match:
+          severity: critical
+        receiver: 'pagerduty-critical'
+        group_wait: 10s
+        repeat_interval: 30m
+        continue: true  # Also send to other matching routes
+
+      # Critical alerts also go to Slack
+      - match:
+          severity: critical
+        receiver: 'slack-critical'
+        group_wait: 10s
+
+      # Warning alerts - Slack only
+      - match:
+          severity: warning
+        receiver: 'slack-warnings'
+        group_wait: 2m
+        repeat_interval: 12h
+
+      # Security alerts - dedicated channel and PagerDuty
+      - match:
+          category: security
+        receiver: 'security-alerts'
+        group_wait: 10s
+        repeat_interval: 1h
+
+      # Infrastructure alerts
+      - match:
+          category: infrastructure
+        receiver: 'infrastructure-alerts'
+        group_wait: 1m
+        repeat_interval: 6h
+
+      # Application alerts
+      - match:
+          category: application
+        receiver: 'application-alerts'
+        group_wait: 2m
+        repeat_interval: 8h
+
+      # SLO alerts - dedicated handling
+      - match:
+          type: slo
+        receiver: 'slo-alerts'
+        group_wait: 5m
+        repeat_interval: 24h
+
+    # Inhibition rules - suppress certain alerts when others are firing
+    inhibit_rules:
+    # Inhibit warning if critical is firing for same alert
+    - source_match:
+        severity: 'critical'
+      target_match:
+        severity: 'warning'
+      equal: ['alertname', 'cluster', 'service']
+
+    # Inhibit pod alerts if node is down
+    - source_match:
+        alertname: 'NodeNotReady'
+      target_match_re:
+        alertname: 'Pod.*'
+      equal: ['node']
+
+    # Inhibit container alerts if pod is down
+    - source_match:
+        alertname: 'PodNotReady'
+      target_match_re:
+        alertname: 'Container.*'
+      equal: ['pod', 'namespace']
+
+    # Receiver configurations
+    receivers:
+    # Default receiver - email
+    - name: 'default-receiver'
+      email_configs:
+      - to: 'alerts@example.com'
+        from: 'alertmanager@cluster.local'
+        smarthost: 'smtp.example.com:587'
+        auth_username: '${SMTP_USERNAME}'
+        auth_password: '${SMTP_PASSWORD}'
+        headers:
+          Subject: '[{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}] {{ .GroupLabels.SortedPairs.Values | join " " }}'
+        html: '{{ template "email.default.html" . }}'
+
+    # PagerDuty - Critical alerts
+    - name: 'pagerduty-critical'
+      pagerduty_configs:
+      - routing_key: '${PAGERDUTY_CRITICAL_KEY}'
+        description: '{{ template "pagerduty.default.description" . }}'
+        severity: '{{ if eq .GroupLabels.severity "critical" }}critical{{ else }}error{{ end }}'
+        client: 'Kubernetes Cluster Alertmanager'
+        client_url: 'https://alertmanager.cluster.local'
+        details:
+          firing: '{{ template "pagerduty.default.instances" .Alerts.Firing }}'
+          resolved: '{{ template "pagerduty.default.instances" .Alerts.Resolved }}'
+          num_firing: '{{ .Alerts.Firing | len }}'
+          num_resolved: '{{ .Alerts.Resolved | len }}'
+
+    # Slack - Critical alerts channel
+    - name: 'slack-critical'
+      slack_configs:
+      - channel: '#alerts-critical'
+        username: 'AlertManager'
+        icon_emoji: ':fire:'
+        color: '{{ if eq .Status "firing" }}danger{{ else }}good{{ end }}'
+        title: '[{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}] {{ .GroupLabels.alertname }}'
+        text: '{{ range .Alerts }}*Alert:* {{ .Annotations.summary }}\n*Description:* {{ .Annotations.description }}\n*Severity:* {{ .Labels.severity }}\n{{ end }}'
+        actions:
+        - type: button
+          text: 'Runbook :book:'
+          url: '{{ (index .Alerts 0).Annotations.runbook_url }}'
+        - type: button
+          text: 'Query :mag:'
+          url: '{{ (index .Alerts 0).GeneratorURL }}'
+        - type: button
+          text: 'Silence :no_bell:'
+          url: '{{ template "__alertmanagerURL" . }}/#/silences/new?filter=%7B'
+
+    # Slack - Warning alerts channel
+    - name: 'slack-warnings'
+      slack_configs:
+      - channel: '#alerts-warnings'
+        username: 'AlertManager'
+        icon_emoji: ':warning:'
+        color: 'warning'
+        title: '[{{ .Status | toUpper }}] {{ .GroupLabels.alertname }}'
+        text: '{{ range .Alerts }}*Alert:* {{ .Annotations.summary }}\n{{ end }}'
+
+    # Security alerts - both Slack and PagerDuty
+    - name: 'security-alerts'
+      slack_configs:
+      - channel: '#security-alerts'
+        username: 'Security AlertManager'
+        icon_emoji: ':lock:'
+        color: 'danger'
+        title: '[SECURITY] {{ .GroupLabels.alertname }}'
+        text: '{{ range .Alerts }}*Alert:* {{ .Annotations.summary }}\n*Description:* {{ .Annotations.description }}\n{{ end }}'
+      pagerduty_configs:
+      - routing_key: '${PAGERDUTY_SECURITY_KEY}'
+        description: '[SECURITY] {{ .GroupLabels.alertname }}'
+        severity: 'critical'
+
+    # Infrastructure alerts
+    - name: 'infrastructure-alerts'
+      slack_configs:
+      - channel: '#infrastructure-alerts'
+        username: 'Infrastructure AlertManager'
+        icon_emoji: ':construction:'
+        title: '[INFRA] {{ .GroupLabels.alertname }}'
+        text: '{{ range .Alerts }}{{ .Annotations.summary }}\n{{ end }}'
+      webhook_configs:
+      - url: '${WEBHOOK_INFRASTRUCTURE_URL}'
+        send_resolved: true
+
+    # Application alerts
+    - name: 'application-alerts'
+      slack_configs:
+      - channel: '#app-alerts'
+        username: 'App AlertManager'
+        icon_emoji: ':computer:'
+        title: '[APP] {{ .GroupLabels.alertname }}'
+        text: '{{ range .Alerts }}{{ .Annotations.summary }}\n{{ end }}'
+
+    # SLO alerts - special handling
+    - name: 'slo-alerts'
+      slack_configs:
+      - channel: '#slo-alerts'
+        username: 'SLO AlertManager'
+        icon_emoji: ':chart_with_downwards_trend:'
+        color: '{{ if eq .Status "firing" }}danger{{ else }}good{{ end }}'
+        title: '[SLO] {{ .GroupLabels.alertname }}'
+        text: |
+          *SLO Alert*
+          {{ range .Alerts }}
+          *Service:* {{ .Labels.service }}
+          *SLO:* {{ .Labels.slo }}
+          *Current Value:* {{ .Annotations.current_value }}
+          *Threshold:* {{ .Annotations.threshold }}
+          *Error Budget Remaining:* {{ .Annotations.error_budget }}
+          {{ end }}
+      pagerduty_configs:
+      - routing_key: '${PAGERDUTY_SLO_KEY}'
+        description: 'SLO violation: {{ .GroupLabels.alertname }}'
+        severity: 'error'
+
+---
+# Alertmanager notification templates
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-templates
+  namespace: monitoring
+data:
+  default.tmpl: |
+    {{ define "cluster" }}{{ .ExternalURL | reReplaceAll ".*//([^:]+).*" "$1" }}{{ end }}
+
+    {{ define "__alertmanager" }}AlertManager{{ end }}
+    {{ define "__alertmanagerURL" }}{{ .ExternalURL }}/#/alerts?receiver={{ .Receiver }}{{ end }}
+
+    {{ define "__subject" }}[{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}] {{ .GroupLabels.SortedPairs.Values | join " " }} {{ if gt (len .CommonLabels) (len .GroupLabels) }}({{ with .CommonLabels.Remove .GroupLabels.Names }}{{ .Values | join " " }}{{ end }}){{ end }}{{ end }}
+
+    {{ define "__description" }}{{ end }}
+
+    {{ define "__text_alert_list" }}{{ range . }}
+    Labels:
+    {{ range .Labels.SortedPairs }} - {{ .Name }} = {{ .Value }}
+    {{ end }}Annotations:
+    {{ range .Annotations.SortedPairs }} - {{ .Name }} = {{ .Value }}
+    {{ end }}Source: {{ .GeneratorURL }}
+    {{ end }}{{ end }}
+
+    {{ define "slack.default.title" }}{{ template "__subject" . }}{{ end }}
+    {{ define "slack.default.username" }}{{ template "__alertmanager" . }}{{ end }}
+    {{ define "slack.default.fallback" }}{{ template "slack.default.title" . }} | {{ template "slack.default.titlelink" . }}{{ end }}
+    {{ define "slack.default.pretext" }}{{ end }}
+    {{ define "slack.default.titlelink" }}{{ template "__alertmanagerURL" . }}{{ end }}
+    {{ define "slack.default.iconemoji" }}{{ end }}
+    {{ define "slack.default.iconurl" }}{{ end }}
+    {{ define "slack.default.text" }}{{ end }}
+
+    {{ define "pagerduty.default.description" }}{{ template "__subject" . }}{{ end }}
+    {{ define "pagerduty.default.client" }}{{ template "__alertmanager" . }}{{ end }}
+    {{ define "pagerduty.default.clientURL" }}{{ template "__alertmanagerURL" . }}{{ end }}
+    {{ define "pagerduty.default.instances" }}{{ template "__text_alert_list" . }}{{ end }}
+
+    {{ define "email.default.subject" }}{{ template "__subject" . }}{{ end }}
+    {{ define "email.default.html" }}
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <style>
+        body { font-family: Arial, sans-serif; }
+        .alert { margin: 20px; padding: 15px; border-left: 4px solid; }
+        .critical { border-color: #d9534f; background-color: #f2dede; }
+        .warning { border-color: #f0ad4e; background-color: #fcf8e3; }
+        .info { border-color: #5bc0de; background-color: #d9edf7; }
+        .label { font-weight: bold; }
+      </style>
+    </head>
+    <body>
+      <h2>{{ .Status | toUpper }} Alert{{ if eq .Status "firing" }}s{{ end }}</h2>
+      {{ range .Alerts }}
+      <div class="alert {{ .Labels.severity }}">
+        <p class="label">Alert: {{ .Labels.alertname }}</p>
+        <p>{{ .Annotations.summary }}</p>
+        <p>{{ .Annotations.description }}</p>
+        <p><strong>Severity:</strong> {{ .Labels.severity }}</p>
+        <p><strong>Started:</strong> {{ .StartsAt }}</p>
+        {{ if .EndsAt }}<p><strong>Ended:</strong> {{ .EndsAt }}</p>{{ end }}
+        <p><a href="{{ .GeneratorURL }}">View in Prometheus</a></p>
+        {{ if .Annotations.runbook_url }}<p><a href="{{ .Annotations.runbook_url }}">Runbook</a></p>{{ end }}
+      </div>
+      {{ end }}
+    </body>
+    </html>
+    {{ end }}
+
+---
+# Alertmanager Deployment
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager
+  namespace: monitoring
+  labels:
+    app: alertmanager
+spec:
+  type: ClusterIP
+  ports:
+  - name: web
+    port: 9093
+    targetPort: 9093
+  selector:
+    app: alertmanager
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: alertmanager
+  namespace: monitoring
+spec:
+  serviceName: alertmanager
+  replicas: 3  # HA setup
+  selector:
+    matchLabels:
+      app: alertmanager
+  template:
+    metadata:
+      labels:
+        app: alertmanager
+    spec:
+      serviceAccountName: alertmanager
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        fsGroup: 65534
+      containers:
+      - name: alertmanager
+        image: quay.io/prometheus/alertmanager:v0.27.0
+        args:
+        - --config.file=/etc/alertmanager/alertmanager.yaml
+        - --storage.path=/alertmanager
+        - --cluster.listen-address=[$(POD_IP)]:9094
+        - --cluster.peer=alertmanager-0.alertmanager.monitoring.svc:9094
+        - --cluster.peer=alertmanager-1.alertmanager.monitoring.svc:9094
+        - --cluster.peer=alertmanager-2.alertmanager.monitoring.svc:9094
+        - --web.external-url=https://alertmanager.cluster.local
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: SLACK_WEBHOOK_URL
+          valueFrom:
+            secretKeyRef:
+              name: alertmanager-secrets
+              key: slack-webhook-url
+        - name: PAGERDUTY_CRITICAL_KEY
+          valueFrom:
+            secretKeyRef:
+              name: alertmanager-secrets
+              key: pagerduty-critical-key
+        - name: PAGERDUTY_SECURITY_KEY
+          valueFrom:
+            secretKeyRef:
+              name: alertmanager-secrets
+              key: pagerduty-security-key
+        - name: PAGERDUTY_SLO_KEY
+          valueFrom:
+            secretKeyRef:
+              name: alertmanager-secrets
+              key: pagerduty-slo-key
+        - name: SMTP_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: alertmanager-secrets
+              key: smtp-username
+        - name: SMTP_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: alertmanager-secrets
+              key: smtp-password
+        - name: WEBHOOK_INFRASTRUCTURE_URL
+          valueFrom:
+            secretKeyRef:
+              name: alertmanager-secrets
+              key: webhook-infrastructure-url
+        ports:
+        - name: web
+          containerPort: 9093
+        - name: cluster
+          containerPort: 9094
+        volumeMounts:
+        - name: config
+          mountPath: /etc/alertmanager
+        - name: templates
+          mountPath: /etc/alertmanager/templates
+        - name: storage
+          mountPath: /alertmanager
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        livenessProbe:
+          httpGet:
+            path: /-/healthy
+            port: 9093
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /-/ready
+            port: 9093
+          initialDelaySeconds: 10
+          periodSeconds: 5
+      volumes:
+      - name: config
+        secret:
+          secretName: alertmanager-config
+      - name: templates
+        configMap:
+          name: alertmanager-templates
+  volumeClaimTemplates:
+  - metadata:
+      name: storage
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 10Gi
+
+---
+# ServiceAccount for Alertmanager
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alertmanager
+  namespace: monitoring
+
+---
+# Secrets placeholder (to be filled with actual values)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: alertmanager-secrets
+  namespace: monitoring
+type: Opaque
+stringData:
+  # Slack webhook URL
+  slack-webhook-url: "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+
+  # PagerDuty integration keys
+  pagerduty-critical-key: "YOUR_PAGERDUTY_CRITICAL_KEY"
+  pagerduty-security-key: "YOUR_PAGERDUTY_SECURITY_KEY"
+  pagerduty-slo-key: "YOUR_PAGERDUTY_SLO_KEY"
+
+  # SMTP credentials
+  smtp-username: "alerts@example.com"
+  smtp-password: "YOUR_SMTP_PASSWORD"
+
+  # Webhook URLs
+  webhook-infrastructure-url: "https://webhook.example.com/infrastructure"
+
+---
+# Ingress for Alertmanager UI
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: alertmanager
+  namespace: monitoring
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/auth-type: basic
+    nginx.ingress.kubernetes.io/auth-secret: alertmanager-basic-auth
+    nginx.ingress.kubernetes.io/auth-realm: 'Authentication Required - Alertmanager'
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - alertmanager.cluster.local
+    secretName: alertmanager-tls
+  rules:
+  - host: alertmanager.cluster.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: alertmanager
+            port:
+              number: 9093

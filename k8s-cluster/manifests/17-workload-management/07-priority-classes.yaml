@@ -1,0 +1,298 @@
+---
+# Critical Priority Class (Highest - System Critical)
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: critical-priority
+  labels:
+    priority-tier: critical
+value: 1000000
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: "Priority class for critical system services that must always run"
+---
+# High Priority Class (Production Services)
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: high-priority
+  labels:
+    priority-tier: high
+value: 100000
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: "Priority class for high-priority production services"
+---
+# Medium Priority Class (Default for most services)
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: medium-priority
+  labels:
+    priority-tier: medium
+value: 10000
+globalDefault: true
+preemptionPolicy: PreemptLowerPriority
+description: "Priority class for standard production services (default)"
+---
+# Low Priority Class (Background jobs)
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: low-priority
+  labels:
+    priority-tier: low
+value: 1000
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: "Priority class for low-priority background jobs"
+---
+# Best Effort Priority Class (Non-critical, can be evicted)
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: best-effort-priority
+  labels:
+    priority-tier: best-effort
+value: 100
+globalDefault: false
+preemptionPolicy: Never
+description: "Priority class for best-effort workloads that can be preempted"
+---
+# Example: Critical Service with Critical Priority
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: critical-api
+  namespace: workload-demo
+  labels:
+    app: critical-api
+    priority: critical
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: critical-api
+  template:
+    metadata:
+      labels:
+        app: critical-api
+    spec:
+      priorityClassName: critical-priority
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 2000
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - critical-api
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: api
+        image: ghcr.io/stefanprodan/podinfo:6.9.2
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL
+        ports:
+        - name: http
+          containerPort: 9898
+          protocol: TCP
+        command:
+        - ./podinfo
+        - --port=9898
+        - --level=info
+        env:
+        - name: PODINFO_UI_COLOR
+          value: "#FF0000"
+        - name: PODINFO_UI_MESSAGE
+          value: "Critical API"
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 9898
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 9898
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 512Mi
+          requests:
+            cpu: 500m
+            memory: 256Mi
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: data
+        emptyDir: {}
+---
+# Example: Background Job with Low Priority
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: data-export
+  namespace: workload-demo
+  labels:
+    app: data-export
+    priority: low
+spec:
+  schedule: "0 3 * * *"
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 7200
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            app: data-export
+        spec:
+          priorityClassName: low-priority
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            fsGroup: 2000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+          - name: export
+            image: busybox:1.36
+            imagePullPolicy: IfNotPresent
+            securityContext:
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              runAsNonRoot: true
+              runAsUser: 1000
+              capabilities:
+                drop:
+                - ALL
+            command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              echo "Starting data export at $(date)"
+              sleep 60
+              echo "Data export completed at $(date)"
+            resources:
+              limits:
+                cpu: 200m
+                memory: 128Mi
+              requests:
+                cpu: 50m
+                memory: 32Mi
+            volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          volumes:
+          - name: tmp
+            emptyDir: {}
+---
+# Example: Best Effort Workload (Development/Testing)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dev-test-service
+  namespace: workload-demo
+  labels:
+    app: dev-test-service
+    priority: best-effort
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dev-test-service
+  template:
+    metadata:
+      labels:
+        app: dev-test-service
+    spec:
+      priorityClassName: best-effort-priority
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 2000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: service
+        image: ghcr.io/stefanprodan/podinfo:6.9.2
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL
+        ports:
+        - name: http
+          containerPort: 9898
+          protocol: TCP
+        command:
+        - ./podinfo
+        - --port=9898
+        - --level=info
+        env:
+        - name: PODINFO_UI_COLOR
+          value: "#808080"
+        - name: PODINFO_UI_MESSAGE
+          value: "Dev Test Service"
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 9898
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 9898
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          limits:
+            cpu: 200m
+            memory: 128Mi
+          requests:
+            cpu: 50m
+            memory: 32Mi
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: data
+        emptyDir: {}

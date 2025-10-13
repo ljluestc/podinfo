@@ -1,0 +1,333 @@
+---
+# Istio Operator Installation
+# This IstioOperator provides a production-ready Istio deployment
+# with security, observability, and high availability features enabled.
+#
+# Installation Instructions:
+# 1. Install Istio CLI:
+#    curl -L https://istio.io/downloadIstio | ISTIO_VERSION=1.20.0 sh -
+#    cd istio-1.20.0
+#    export PATH=$PWD/bin:$PATH
+#
+# 2. Install Istio Operator:
+#    istioctl operator init
+#
+# 3. Apply this configuration:
+#    kubectl apply -f 00-istio-operator.yaml
+#
+# 4. Verify installation:
+#    kubectl get pods -n istio-system
+#    istioctl verify-install
+
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+metadata:
+  namespace: istio-system
+  name: istio-control-plane
+spec:
+  # Production profile with enhanced security and reliability
+  profile: production
+
+  # Mesh-wide configuration
+  meshConfig:
+    # Enable access logs for debugging and audit
+    accessLogFile: /dev/stdout
+    accessLogFormat: |
+      [%START_TIME%] "%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%" %RESPONSE_CODE% %RESPONSE_FLAGS% %BYTES_RECEIVED% %BYTES_SENT% %DURATION% %RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)% "%REQ(X-FORWARDED-FOR)%" "%REQ(USER-AGENT)%" "%REQ(X-REQUEST-ID)%" "%REQ(:AUTHORITY)%" "%UPSTREAM_HOST%" %UPSTREAM_CLUSTER% %UPSTREAM_LOCAL_ADDRESS% %DOWNSTREAM_LOCAL_ADDRESS% %DOWNSTREAM_REMOTE_ADDRESS% %REQUESTED_SERVER_NAME% %ROUTE_NAME%
+
+    # Enable distributed tracing
+    enableTracing: true
+    defaultConfig:
+      tracing:
+        sampling: 100.0  # 100% sampling for complete visibility
+        custom_tags:
+          environment:
+            literal:
+              value: production
+          cluster:
+            literal:
+              value: kubernetes-security-cluster
+        zipkin:
+          address: jaeger-collector.observability.svc.cluster.local:9411
+
+      # Hold application until proxy starts (prevent traffic before ready)
+      holdApplicationUntilProxyStarts: true
+
+      # Proxy configuration for performance and security
+      proxyMetadata:
+        ISTIO_META_DNS_CAPTURE: "true"
+        ISTIO_META_DNS_AUTO_ALLOCATE: "true"
+
+      # Concurrency settings for proxy
+      concurrency: 2
+
+    # Enable automatic mTLS for all service-to-service communication
+    enableAutoMtls: true
+
+    # Certificate configuration with rotation
+    certificates:
+      - secretName: dns.example-cacerts
+        dnsNames:
+        - "*.local"
+
+    # Trust domain for certificate validation
+    trustDomain: cluster.local
+
+    # Default service and revision settings
+    defaultServiceExportTo:
+    - "*"
+
+    # Enable Prometheus metrics
+    enablePrometheusMerge: true
+
+    # Protocol detection timeout
+    protocolDetectionTimeout: 0s
+
+    # Root namespace for cross-namespace resources
+    rootNamespace: istio-system
+
+    # CA configuration
+    ca:
+      address: istiod.istio-system.svc:15012
+
+  # Component-specific configuration
+  components:
+    # Istiod (Control Plane)
+    pilot:
+      enabled: true
+      k8s:
+        env:
+        # Enable debug endpoints for troubleshooting
+        - name: PILOT_ENABLE_STATUS
+          value: "true"
+        # JWT policy for service-to-service authentication
+        - name: JWT_POLICY
+          value: third-party-jwt
+        # Enable analysis for configuration validation
+        - name: PILOT_ENABLE_ANALYSIS
+          value: "true"
+
+        resources:
+          requests:
+            cpu: 500m
+            memory: 2048Mi
+          limits:
+            cpu: 2000m
+            memory: 4096Mi
+
+        # Horizontal Pod Autoscaler for control plane
+        hpaSpec:
+          minReplicas: 2
+          maxReplicas: 5
+          metrics:
+          - type: Resource
+            resource:
+              name: cpu
+              targetAverageUtilization: 80
+
+        # Pod placement for high availability
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: istiod
+              topologyKey: kubernetes.io/hostname
+
+        # Security context
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1337
+          runAsGroup: 1337
+          fsGroup: 1337
+          capabilities:
+            drop:
+            - ALL
+
+    # Ingress Gateway
+    ingressGateways:
+    - name: istio-ingressgateway
+      enabled: true
+      k8s:
+        resources:
+          requests:
+            cpu: 200m
+            memory: 256Mi
+          limits:
+            cpu: 2000m
+            memory: 1024Mi
+
+        hpaSpec:
+          minReplicas: 2
+          maxReplicas: 5
+          metrics:
+          - type: Resource
+            resource:
+              name: cpu
+              targetAverageUtilization: 80
+
+        service:
+          type: LoadBalancer
+          ports:
+          - name: status-port
+            port: 15021
+            targetPort: 15021
+            protocol: TCP
+          - name: http2
+            port: 80
+            targetPort: 8080
+            protocol: TCP
+          - name: https
+            port: 443
+            targetPort: 8443
+            protocol: TCP
+          - name: tcp
+            port: 31400
+            targetPort: 31400
+            protocol: TCP
+          - name: tls
+            port: 15443
+            targetPort: 15443
+            protocol: TCP
+
+        # Pod placement for high availability
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: istio-ingressgateway
+              topologyKey: kubernetes.io/hostname
+
+        # Security context
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1337
+          runAsGroup: 1337
+          fsGroup: 1337
+
+    # Egress Gateway for controlled external access
+    egressGateways:
+    - name: istio-egressgateway
+      enabled: true
+      k8s:
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 1000m
+            memory: 512Mi
+
+        hpaSpec:
+          minReplicas: 2
+          maxReplicas: 5
+          metrics:
+          - type: Resource
+            resource:
+              name: cpu
+              targetAverageUtilization: 80
+
+        # Pod placement for high availability
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: istio-egressgateway
+              topologyKey: kubernetes.io/hostname
+
+  # Global values
+  values:
+    global:
+      # Logging configuration
+      logging:
+        level: "default:info"
+
+      # Policy enforcement
+      policyCheckFailOpen: false
+
+      # JWT policy for authentication
+      jwtPolicy: third-party-jwt
+
+      # Proxy configuration
+      proxy:
+        # Logging level for proxies
+        logLevel: warning
+
+        # Component logging levels
+        componentLogLevel: "misc:error"
+
+        # Resources for sidecar proxies
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 2000m
+            memory: 1024Mi
+
+        # Privileged mode (disabled for security)
+        privileged: false
+
+        # Enable core dumps for debugging
+        enableCoreDump: false
+
+        # Readiness check
+        readinessInitialDelaySeconds: 1
+        readinessPeriodSeconds: 2
+        readinessFailureThreshold: 30
+
+        # Status port for health checks
+        statusPort: 15020
+
+        # Enable Prometheus metrics
+        includeIPRanges: "*"
+
+      # Proxy initialization
+      proxy_init:
+        resources:
+          limits:
+            cpu: 100m
+            memory: 50Mi
+          requests:
+            cpu: 10m
+            memory: 10Mi
+
+      # Image pull policy
+      imagePullPolicy: IfNotPresent
+
+      # Multi-cluster configuration
+      multiCluster:
+        enabled: false
+
+      # Network configuration
+      network: ""
+
+    # Pilot-specific values
+    pilot:
+      # Trace sampling (100% for development, lower in production)
+      traceSampling: 100.0
+
+      # Enable protocol sniffing
+      enableProtocolSniffingForOutbound: true
+      enableProtocolSniffingForInbound: true
+
+    # Telemetry configuration
+    telemetry:
+      enabled: true
+      v2:
+        enabled: true
+        prometheus:
+          enabled: true
+        stackdriver:
+          enabled: false
+
+    # Sidecar injector configuration
+    sidecarInjectorWebhook:
+      enableNamespacesByDefault: false
+      rewriteAppHTTPProbe: true
+
+    # gRPC configuration
+    grpc:
+      maxConcurrentStreams: 100000

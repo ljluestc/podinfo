@@ -1,0 +1,240 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: auth-system
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dex-config
+  namespace: auth-system
+data:
+  config.yaml: |
+    issuer: https://dex.example.com
+    storage:
+      type: kubernetes
+      config:
+        inCluster: true
+    web:
+      http: 0.0.0.0:5556
+    telemetry:
+      http: 0.0.0.0:5558
+    oauth2:
+      skipApprovalScreen: false
+      responseTypes:
+        - code
+        - token
+        - id_token
+      # Token expiration settings
+      idTokenExpiry: "24h"
+      accessTokenExpiry: "24h"
+      refreshTokenExpiry: "720h"  # 30 days
+    # Enable OIDC provider
+    enablePasswordDB: true
+    staticPasswords:
+    - email: "admin@example.com"
+      hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"  # password: admin (change in production!)
+      username: "admin"
+      userID: "08a8684b-db88-4b73-90a9-3cd1661f5466"
+    - email: "developer@example.com"
+      hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"  # password: developer
+      username: "developer"
+      userID: "08a8684b-db88-4b73-90a9-3cd1661f5467"
+    - email: "viewer@example.com"
+      hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"  # password: viewer
+      username: "viewer"
+      userID: "08a8684b-db88-4b73-90a9-3cd1661f5468"
+    # Static clients for kubectl and other tools
+    staticClients:
+    - id: kubernetes
+      redirectURIs:
+      - 'http://localhost:8000'
+      - 'http://localhost:18000'
+      - 'urn:ietf:wg:oauth:2.0:oob'
+      name: 'Kubernetes'
+      secret: kubernetes-client-secret
+    # Connector for external identity providers
+    connectors:
+    - type: ldap
+      name: OpenLDAP
+      id: ldap
+      config:
+        # LDAP configuration (optional - for enterprise integration)
+        host: ldap.example.com:636
+        insecureNoSSL: false
+        insecureSkipVerify: false
+        bindDN: cn=admin,dc=example,dc=com
+        bindPW: admin
+        usernamePrompt: Email Address
+        userSearch:
+          baseDN: ou=People,dc=example,dc=com
+          filter: "(objectClass=person)"
+          username: mail
+          idAttr: DN
+          emailAttr: mail
+          nameAttr: cn
+        groupSearch:
+          baseDN: ou=Groups,dc=example,dc=com
+          filter: "(objectClass=groupOfNames)"
+          userMatchers:
+          - userAttr: DN
+            groupAttr: member
+          nameAttr: cn
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dex
+  namespace: auth-system
+  labels:
+    app: dex
+spec:
+  replicas: 3  # HA deployment
+  selector:
+    matchLabels:
+      app: dex
+  template:
+    metadata:
+      labels:
+        app: dex
+    spec:
+      serviceAccountName: dex
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: dex
+        image: ghcr.io/dexidp/dex:v2.37.0
+        imagePullPolicy: IfNotPresent
+        command:
+        - /usr/local/bin/dex
+        - serve
+        - /etc/dex/cfg/config.yaml
+        ports:
+        - name: http
+          containerPort: 5556
+          protocol: TCP
+        - name: telemetry
+          containerPort: 5558
+          protocol: TCP
+        - name: grpc
+          containerPort: 5557
+          protocol: TCP
+        volumeMounts:
+        - name: config
+          mountPath: /etc/dex/cfg
+        - name: tls
+          mountPath: /etc/dex/tls
+        env:
+        - name: KUBERNETES_POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: telemetry
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: telemetry
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 65534
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: config
+        configMap:
+          name: dex-config
+          items:
+          - key: config.yaml
+            path: config.yaml
+      - name: tls
+        secret:
+          secretName: dex-tls
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - dex
+              topologyKey: kubernetes.io/hostname
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dex
+  namespace: auth-system
+  labels:
+    app: dex
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 5556
+    targetPort: http
+    protocol: TCP
+  - name: telemetry
+    port: 5558
+    targetPort: telemetry
+    protocol: TCP
+  - name: grpc
+    port: 5557
+    targetPort: grpc
+    protocol: TCP
+  selector:
+    app: dex
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dex
+  namespace: auth-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dex
+rules:
+- apiGroups: ["dex.coreos.com"]
+  resources: ["*"]
+  verbs: ["*"]
+- apiGroups: ["apiextensions.k8s.io"]
+  resources: ["customresourcedefinitions"]
+  verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dex
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dex
+subjects:
+- kind: ServiceAccount
+  name: dex
+  namespace: auth-system

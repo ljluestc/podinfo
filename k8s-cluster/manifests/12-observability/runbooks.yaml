@@ -1,0 +1,724 @@
+---
+# Alert Runbooks ConfigMap
+# Comprehensive troubleshooting guides for common alerts
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alert-runbooks
+  namespace: monitoring
+  labels:
+    app: alertmanager
+    component: runbooks
+data:
+  node-not-ready.md: |
+    # Runbook: Node Not Ready
+
+    ## Alert Description
+    A Kubernetes node has been in NotReady state for more than 5 minutes.
+
+    ## Severity: Critical
+
+    ## Impact
+    - Pods on this node cannot be scheduled
+    - Existing pods may be evicted
+    - Cluster capacity is reduced
+    - Potential service disruption
+
+    ## Diagnosis Steps
+
+    1. Check node status:
+       ```bash
+       kubectl get nodes
+       kubectl describe node <node-name>
+       ```
+
+    2. Check node conditions:
+       ```bash
+       kubectl get node <node-name> -o jsonpath='{.status.conditions[*]}' | jq
+       ```
+
+    3. Check kubelet logs:
+       ```bash
+       ssh <node> 'journalctl -u kubelet -n 100'
+       ```
+
+    4. Check system resources:
+       ```bash
+       ssh <node> 'df -h'
+       ssh <node> 'free -m'
+       ssh <node> 'top -bn1'
+       ```
+
+    5. Check container runtime:
+       ```bash
+       ssh <node> 'systemctl status containerd'
+       ssh <node> 'crictl ps'
+       ```
+
+    ## Resolution Steps
+
+    ### If disk pressure:
+    ```bash
+    # Clean up unused images
+    ssh <node> 'crictl rmi --prune'
+
+    # Clean up old logs
+    ssh <node> 'journalctl --vacuum-time=3d'
+    ```
+
+    ### If memory pressure:
+    ```bash
+    # Identify memory-heavy pods
+    kubectl top pods --all-namespaces --sort-by=memory
+
+    # Consider evicting non-critical pods
+    kubectl drain <node> --ignore-daemonsets --delete-emptydir-data
+    ```
+
+    ### If network issues:
+    ```bash
+    # Check CNI plugin
+    ssh <node> 'systemctl status calico-node'  # or your CNI
+
+    # Restart network plugin
+    kubectl delete pod -n kube-system -l k8s-app=calico-node
+    ```
+
+    ### If kubelet issues:
+    ```bash
+    # Restart kubelet
+    ssh <node> 'systemctl restart kubelet'
+
+    # Check kubelet logs
+    ssh <node> 'journalctl -u kubelet -f'
+    ```
+
+    ### If node is truly down:
+    ```bash
+    # Cordon the node
+    kubectl cordon <node>
+
+    # Drain the node
+    kubectl drain <node> --ignore-daemonsets --delete-emptydir-data
+
+    # Replace or repair the node
+    # Then uncordon when ready
+    kubectl uncordon <node>
+    ```
+
+    ## Prevention
+    - Monitor disk usage trends
+    - Set up log rotation
+    - Configure resource limits on pods
+    - Regular node maintenance windows
+
+    ## Related Alerts
+    - NodeDiskPressure
+    - NodeMemoryPressure
+    - PodNotReady
+
+  pod-crash-looping.md: |
+    # Runbook: Pod Crash Looping
+
+    ## Alert Description
+    A pod has restarted multiple times in the last 15 minutes.
+
+    ## Severity: Warning
+
+    ## Impact
+    - Application availability may be affected
+    - Resource waste from continuous restarts
+    - Potential data corruption
+
+    ## Diagnosis Steps
+
+    1. Check pod status:
+       ```bash
+       kubectl get pod <pod-name> -n <namespace>
+       kubectl describe pod <pod-name> -n <namespace>
+       ```
+
+    2. Check container logs:
+       ```bash
+       kubectl logs <pod-name> -n <namespace> --previous
+       kubectl logs <pod-name> -n <namespace> --tail=100
+       ```
+
+    3. Check events:
+       ```bash
+       kubectl get events -n <namespace> --field-selector involvedObject.name=<pod-name>
+       ```
+
+    4. Check resource limits:
+       ```bash
+       kubectl get pod <pod-name> -n <namespace> -o json | jq '.spec.containers[].resources'
+       ```
+
+    ## Common Causes and Solutions
+
+    ### Application Error
+    ```bash
+    # Review application logs
+    kubectl logs <pod-name> -n <namespace> --previous
+
+    # Check application configuration
+    kubectl get configmap -n <namespace>
+    kubectl get secret -n <namespace>
+
+    # Verify environment variables
+    kubectl get pod <pod-name> -n <namespace> -o json | jq '.spec.containers[].env'
+    ```
+
+    ### Resource Limits
+    ```bash
+    # Check if OOMKilled
+    kubectl describe pod <pod-name> -n <namespace> | grep -i oom
+
+    # Increase memory limits if needed
+    kubectl set resources deployment <deployment> --limits=memory=2Gi
+    ```
+
+    ### Failed Health Checks
+    ```bash
+    # Check liveness/readiness probes
+    kubectl get pod <pod-name> -n <namespace> -o json | jq '.spec.containers[].livenessProbe'
+
+    # Adjust probe settings
+    # Edit deployment to increase initialDelaySeconds or periodSeconds
+    ```
+
+    ### Missing Dependencies
+    ```bash
+    # Check if dependent services are available
+    kubectl get svc -n <namespace>
+    kubectl get endpoints -n <namespace>
+
+    # Test connectivity from pod
+    kubectl exec <pod-name> -n <namespace> -- curl -v http://dependency-service
+    ```
+
+    ### Configuration Issues
+    ```bash
+    # Validate ConfigMap
+    kubectl get configmap <config-name> -n <namespace> -o yaml
+
+    # Validate Secret
+    kubectl get secret <secret-name> -n <namespace> -o yaml
+
+    # Check for missing volumes
+    kubectl describe pod <pod-name> -n <namespace> | grep -A 5 Volumes
+    ```
+
+    ## Resolution Steps
+
+    1. Fix the underlying issue based on diagnosis
+    2. Update deployment/pod spec if needed
+    3. Delete the pod to force recreation:
+       ```bash
+       kubectl delete pod <pod-name> -n <namespace>
+       ```
+    4. Monitor for continued crashes:
+       ```bash
+       kubectl get pod <pod-name> -n <namespace> -w
+       ```
+
+    ## Prevention
+    - Implement proper health checks
+    - Set appropriate resource limits
+    - Test configuration changes in staging
+    - Use init containers for dependencies
+    - Implement graceful shutdown
+
+  apiserver-down.md: |
+    # Runbook: Kubernetes API Server Down
+
+    ## Alert Description
+    The Kubernetes API Server is unreachable or down.
+
+    ## Severity: Critical
+
+    ## Impact
+    - No kubectl commands work
+    - No deployments or updates possible
+    - Existing workloads continue but can't be managed
+    - Cluster is effectively frozen
+
+    ## Immediate Actions
+
+    1. Verify API server is actually down:
+       ```bash
+       kubectl get nodes  # This will fail if API server is down
+       curl -k https://api-server:6443/healthz
+       ```
+
+    2. Check from control plane node:
+       ```bash
+       ssh control-plane-node
+       systemctl status kube-apiserver
+       ```
+
+    3. Check API server logs:
+       ```bash
+       journalctl -u kube-apiserver -n 200
+       ```
+
+    4. Check API server pods (if using static pods):
+       ```bash
+       docker ps | grep kube-apiserver
+       crictl ps | grep kube-apiserver
+       ```
+
+    ## Diagnosis Steps
+
+    ### Check etcd health
+    ```bash
+    ETCDCTL_API=3 etcdctl --endpoints=https://127.0.0.1:2379 \
+      --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+      --cert=/etc/kubernetes/pki/etcd/server.crt \
+      --key=/etc/kubernetes/pki/etcd/server.key \
+      endpoint health
+    ```
+
+    ### Check certificates
+    ```bash
+    # Check API server certificate expiry
+    openssl x509 -in /etc/kubernetes/pki/apiserver.crt -noout -enddate
+
+    # Check all certificates
+    kubeadm certs check-expiration
+    ```
+
+    ### Check disk space
+    ```bash
+    df -h
+    ```
+
+    ### Check system resources
+    ```bash
+    free -m
+    top -bn1
+    ```
+
+    ## Resolution Steps
+
+    ### If etcd is down:
+    ```bash
+    # Start etcd
+    systemctl start etcd
+
+    # Restore from backup if needed
+    ETCDCTL_API=3 etcdctl snapshot restore snapshot.db
+    ```
+
+    ### If certificates expired:
+    ```bash
+    # Renew certificates
+    kubeadm certs renew all
+
+    # Restart API server
+    systemctl restart kube-apiserver
+    ```
+
+    ### If API server crashed:
+    ```bash
+    # Check manifest file
+    cat /etc/kubernetes/manifests/kube-apiserver.yaml
+
+    # Restart kubelet (which manages static pods)
+    systemctl restart kubelet
+
+    # Or manually restart container
+    docker restart <apiserver-container-id>
+    ```
+
+    ### If disk is full:
+    ```bash
+    # Clean up logs
+    journalctl --vacuum-time=1d
+
+    # Clean up old containers
+    crictl rm $(crictl ps -a -q)
+
+    # Clean up old images
+    crictl rmi --prune
+    ```
+
+    ## Recovery Verification
+
+    ```bash
+    # Test API server
+    kubectl get nodes
+    kubectl get pods --all-namespaces
+
+    # Check cluster health
+    kubectl get componentstatuses
+    ```
+
+    ## Prevention
+    - Monitor etcd health continuously
+    - Set up certificate auto-renewal
+    - Monitor disk space
+    - Have HA control plane (3+ masters)
+    - Regular backups of etcd
+
+  high-cpu-memory.md: |
+    # Runbook: High CPU/Memory Usage
+
+    ## Alert Description
+    A pod or node is experiencing high CPU or memory usage.
+
+    ## Severity: Warning
+
+    ## Impact
+    - Performance degradation
+    - Potential resource exhaustion
+    - Risk of pod eviction
+    - May trigger autoscaling
+
+    ## Diagnosis Steps
+
+    ### For Pods
+    ```bash
+    # Check resource usage
+    kubectl top pod -n <namespace>
+    kubectl top pod <pod-name> -n <namespace> --containers
+
+    # Check resource limits
+    kubectl describe pod <pod-name> -n <namespace> | grep -A 5 Limits
+
+    # Check metrics
+    kubectl get --raw /apis/metrics.k8s.io/v1beta1/namespaces/<namespace>/pods/<pod-name>
+    ```
+
+    ### For Nodes
+    ```bash
+    # Check node resources
+    kubectl top nodes
+    kubectl describe node <node-name>
+
+    # SSH to node and check
+    ssh <node> 'top -bn1'
+    ssh <node> 'ps aux --sort=-%mem | head -20'
+    ssh <node> 'ps aux --sort=-%cpu | head -20'
+    ```
+
+    ## Resolution Steps
+
+    ### Immediate Actions
+    ```bash
+    # If critical, restart the pod
+    kubectl delete pod <pod-name> -n <namespace>
+
+    # Or scale down temporarily
+    kubectl scale deployment <deployment> -n <namespace> --replicas=0
+    kubectl scale deployment <deployment> -n <namespace> --replicas=3
+    ```
+
+    ### Investigate Root Cause
+    ```bash
+    # Profile application
+    kubectl exec <pod-name> -n <namespace> -- <profiling-command>
+
+    # Check for memory leaks in logs
+    kubectl logs <pod-name> -n <namespace> | grep -i "memory\|oom"
+
+    # Check for expensive queries/operations
+    kubectl logs <pod-name> -n <namespace> --tail=1000
+    ```
+
+    ### Adjust Resources
+    ```bash
+    # Increase limits
+    kubectl set resources deployment <deployment> \
+      --limits=cpu=2,memory=2Gi \
+      --requests=cpu=1,memory=1Gi
+
+    # Enable HPA if not already
+    kubectl autoscale deployment <deployment> \
+      --cpu-percent=80 \
+      --min=3 \
+      --max=10
+    ```
+
+    ## Prevention
+    - Set appropriate resource requests/limits
+    - Implement HPA for auto-scaling
+    - Regular performance testing
+    - Application profiling
+    - Code optimization
+
+  certificate-expiring.md: |
+    # Runbook: Certificate Expiring Soon
+
+    ## Alert Description
+    A TLS certificate is expiring within 7 days.
+
+    ## Severity: Warning
+
+    ## Impact
+    - Service disruption if certificate expires
+    - Authentication failures
+    - Encrypted communication breakdown
+
+    ## Diagnosis Steps
+
+    ```bash
+    # Check certificate expiration
+    echo | openssl s_client -connect <host>:443 2>/dev/null | \
+      openssl x509 -noout -enddate
+
+    # For Kubernetes certificates
+    kubeadm certs check-expiration
+
+    # For cert-manager managed certificates
+    kubectl get certificate -A
+    kubectl describe certificate <cert-name> -n <namespace>
+    ```
+
+    ## Resolution Steps
+
+    ### For Kubernetes System Certificates
+    ```bash
+    # Renew all certificates
+    kubeadm certs renew all
+
+    # Restart control plane components
+    systemctl restart kubelet
+
+    # Verify renewal
+    kubeadm certs check-expiration
+    ```
+
+    ### For cert-manager Certificates
+    ```bash
+    # Check certificate resource
+    kubectl describe certificate <cert-name> -n <namespace>
+
+    # Force renewal
+    kubectl annotate certificate <cert-name> -n <namespace> \
+      cert-manager.io/issue-temporary-certificate="true"
+
+    # Or delete and recreate
+    kubectl delete certificate <cert-name> -n <namespace>
+    # cert-manager will recreate it
+    ```
+
+    ### For Manual Certificates
+    ```bash
+    # Generate new certificate
+    openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365
+
+    # Update secret
+    kubectl create secret tls <secret-name> \
+      --cert=cert.pem --key=key.pem \
+      --dry-run=client -o yaml | kubectl apply -f -
+
+    # Restart affected pods
+    kubectl rollout restart deployment <deployment> -n <namespace>
+    ```
+
+    ## Prevention
+    - Use cert-manager for automatic renewal
+    - Set up monitoring alerts at 30, 14, and 7 days
+    - Document certificate inventory
+    - Automate certificate rotation
+    - Use short-lived certificates with auto-renewal
+
+  pvc-pending.md: |
+    # Runbook: PersistentVolumeClaim Pending
+
+    ## Alert Description
+    A PVC has been in Pending state for more than 10 minutes.
+
+    ## Severity: Warning
+
+    ## Impact
+    - Pod cannot start
+    - Application cannot persist data
+    - Deployment blocked
+
+    ## Diagnosis Steps
+
+    ```bash
+    # Check PVC status
+    kubectl get pvc -n <namespace>
+    kubectl describe pvc <pvc-name> -n <namespace>
+
+    # Check events
+    kubectl get events -n <namespace> --field-selector involvedObject.name=<pvc-name>
+
+    # Check storage class
+    kubectl get storageclass
+    kubectl describe storageclass <storage-class>
+
+    # Check PV availability
+    kubectl get pv
+    ```
+
+    ## Common Causes and Solutions
+
+    ### No Storage Class
+    ```bash
+    # Set default storage class
+    kubectl patch storageclass <storage-class> \
+      -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+    ```
+
+    ### No Available PVs
+    ```bash
+    # Create PV manually if using static provisioning
+    kubectl apply -f pv.yaml
+
+    # Or check dynamic provisioner
+    kubectl get pods -n kube-system | grep provisioner
+    ```
+
+    ### Insufficient Resources
+    ```bash
+    # Check if requested size is available
+    kubectl get pv -o custom-columns=NAME:.metadata.name,SIZE:.spec.capacity.storage,STATUS:.status.phase
+
+    # Adjust PVC size if needed
+    kubectl edit pvc <pvc-name> -n <namespace>
+    ```
+
+    ### Provisioner Issues
+    ```bash
+    # Check provisioner logs
+    kubectl logs -n kube-system <provisioner-pod>
+
+    # Restart provisioner
+    kubectl delete pod -n kube-system <provisioner-pod>
+    ```
+
+    ## Resolution
+    Fix the underlying issue, then verify:
+    ```bash
+    kubectl get pvc <pvc-name> -n <namespace> -w
+    ```
+
+    ## Prevention
+    - Ensure storage provisioner is healthy
+    - Monitor storage capacity
+    - Set up quota alerts
+    - Test PVC creation in staging
+
+  security-alert.md: |
+    # Runbook: Security Alert
+
+    ## Alert Description
+    A security-related event has been detected by runtime security tools (Falco, etc.)
+
+    ## Severity: Critical
+
+    ## Impact
+    - Potential security breach
+    - Possible data exfiltration
+    - System compromise risk
+
+    ## Immediate Actions
+
+    1. **DO NOT IGNORE** - Security alerts require immediate attention
+    2. Document everything for forensics
+    3. Follow incident response plan
+
+    ## Diagnosis Steps
+
+    ```bash
+    # Check Falco events
+    kubectl logs -n falco daemonset/falco | grep -i "Critical\|Error"
+
+    # Check audit logs
+    kubectl logs -n kube-system <apiserver-audit-pod>
+
+    # Check affected pod
+    kubectl describe pod <pod-name> -n <namespace>
+    kubectl logs <pod-name> -n <namespace>
+
+    # Check for privilege escalation
+    kubectl get pod <pod-name> -n <namespace> -o json | \
+      jq '.spec.containers[].securityContext'
+    ```
+
+    ## Investigation Steps
+
+    ### Identify the threat
+    ```bash
+    # What rule triggered?
+    # What pod/container is involved?
+    # What user/service account?
+    # What action was attempted?
+    ```
+
+    ### Contain the threat
+    ```bash
+    # Isolate the pod with network policy
+    kubectl apply -f - <<EOF
+    apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata:
+      name: isolate-<pod-name>
+      namespace: <namespace>
+    spec:
+      podSelector:
+        matchLabels:
+          app: <pod-label>
+      policyTypes:
+      - Ingress
+      - Egress
+    EOF
+
+    # Or delete the pod immediately
+    kubectl delete pod <pod-name> -n <namespace> --force
+    ```
+
+    ### Collect evidence
+    ```bash
+    # Save pod definition
+    kubectl get pod <pod-name> -n <namespace> -o yaml > pod-evidence.yaml
+
+    # Save logs
+    kubectl logs <pod-name> -n <namespace> --all-containers > pod-logs.txt
+
+    # Save events
+    kubectl get events -n <namespace> > events.txt
+
+    # Capture network connections (if possible before deletion)
+    kubectl exec <pod-name> -n <namespace> -- netstat -an > netstat.txt
+    ```
+
+    ## Response Actions
+
+    ### For compromised workload:
+    ```bash
+    # Delete deployment
+    kubectl delete deployment <deployment> -n <namespace>
+
+    # Review and fix image/configuration
+    # Scan image for vulnerabilities
+    # Deploy patched version
+    ```
+
+    ### For suspicious behavior:
+    ```bash
+    # Increase monitoring
+    # Review RBAC permissions
+    # Check for lateral movement
+    # Review network policies
+    ```
+
+    ## Post-Incident
+
+    1. Document timeline of events
+    2. Root cause analysis
+    3. Update security policies
+    4. Implement additional controls
+    5. Security review of affected workloads
+
+    ## Prevention
+    - Regular security scanning
+    - Enforce Pod Security Standards
+    - Network policy enforcement
+    - RBAC least privilege
+    - Runtime security monitoring
+    - Regular audits

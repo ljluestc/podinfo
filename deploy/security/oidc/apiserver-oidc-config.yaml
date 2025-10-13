@@ -1,0 +1,88 @@
+# API Server OIDC Configuration
+# These flags should be added to the kube-apiserver manifest or systemd configuration
+# Location: /etc/kubernetes/manifests/kube-apiserver.yaml (for kubeadm clusters)
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: apiserver-oidc-config
+  namespace: kube-system
+data:
+  oidc-flags.conf: |
+    # OIDC Authentication Configuration
+    --oidc-issuer-url=https://dex.example.com
+    --oidc-client-id=kubernetes
+    --oidc-username-claim=email
+    --oidc-username-prefix="oidc:"
+    --oidc-groups-claim=groups
+    --oidc-groups-prefix="oidc:"
+    # CA certificate for validating the OIDC provider's certificate
+    --oidc-ca-file=/etc/kubernetes/pki/oidc-ca.crt
+    # Additional OIDC settings
+    --oidc-signing-algs=RS256
+    --oidc-required-claim=aud=kubernetes
+
+  apply-instructions.md: |
+    # Instructions to Apply OIDC Configuration to kube-apiserver
+
+    ## For kubeadm-based clusters:
+
+    1. Edit the kube-apiserver manifest:
+       ```bash
+       sudo vi /etc/kubernetes/manifests/kube-apiserver.yaml
+       ```
+
+    2. Add the following flags to the `command` section:
+       ```yaml
+       - --oidc-issuer-url=https://dex.example.com
+       - --oidc-client-id=kubernetes
+       - --oidc-username-claim=email
+       - --oidc-username-prefix=oidc:
+       - --oidc-groups-claim=groups
+       - --oidc-groups-prefix=oidc:
+       - --oidc-ca-file=/etc/kubernetes/pki/oidc-ca.crt
+       - --oidc-signing-algs=RS256
+       ```
+
+    3. The kube-apiserver will automatically restart with new configuration
+
+    ## For managed Kubernetes (EKS, GKE, AKS):
+
+    ### EKS:
+    ```bash
+    # Use IAM Roles for Service Accounts (IRSA) with OIDC
+    eksctl utils associate-iam-oidc-provider --cluster=your-cluster --approve
+    ```
+
+    ### GKE:
+    ```bash
+    # Configure OIDC in GKE cluster
+    gcloud container clusters update CLUSTER_NAME \
+      --enable-identity-service \
+      --identity-provider-config=IDENTITY_PROVIDER_CONFIG
+    ```
+
+    ### AKS:
+    ```bash
+    # AKS uses Azure AD integration
+    az aks update -g RESOURCE_GROUP -n CLUSTER_NAME --enable-aad
+    ```
+
+    ## Verification:
+
+    ```bash
+    # Check if OIDC flags are applied
+    kubectl -n kube-system get pod -l component=kube-apiserver -o yaml | grep oidc
+    ```
+---
+# Certificate configuration for OIDC
+apiVersion: v1
+kind: Secret
+metadata:
+  name: oidc-ca-cert
+  namespace: kube-system
+type: Opaque
+data:
+  # Base64 encoded CA certificate for Dex
+  # Generate with: cat ca.crt | base64 -w 0
+  ca.crt: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURCVENDQWUyZ0F3SUJBZ0lJZGF1OGRFcDBBdmt3RFFZSktvWklodmNOQVFFTEJRQXdGVEVUTUJFR0ExVUUKQXhNS2EzVmlaWEp1WlhSbGN6QWVGdzB5TkRBMU1qWXhNelEyTXpGYUZ3MHpOREExTWpReE16VXhNekZhTUJVeApFekFSQmdOVkJBTVRDbXQxWW1WeWJtVjBaWE13Z2dFaU1BMEdDU3FHU0liM0RRRUJBUVVBQTRJQkR3QXdnZ0VLCkFvSUJBUURBdUcxaEhOZlR5N2x3PT0KLS0tLS1FTkQgQ0VSVElGSUNBVEUtLS0tLQo=

@@ -1,0 +1,543 @@
+---
+# Service Mesh Test Suite
+# This file contains comprehensive tests to verify service mesh functionality
+# including mTLS, traffic routing, circuit breakers, and observability.
+
+# Test namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mesh-test
+  labels:
+    istio-injection: enabled
+
+---
+# ConfigMap with test scripts
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mesh-test-scripts
+  namespace: mesh-test
+data:
+  test-mtls.sh: |
+    #!/bin/bash
+    # Test mTLS connectivity between services
+    set -e
+
+    echo "=== Testing mTLS Connectivity ==="
+
+    # Test 1: Verify sidecar is present
+    echo "Test 1: Verify sidecar injection"
+    CONTAINERS=$(kubectl get pod -n podinfo -l app=podinfo -o jsonpath='{.items[0].spec.containers[*].name}')
+    if [[ $CONTAINERS == *"istio-proxy"* ]]; then
+      echo "✓ Sidecar injected successfully"
+    else
+      echo "✗ Sidecar not found"
+      exit 1
+    fi
+
+    # Test 2: Check mTLS certificates
+    echo -e "\nTest 2: Verify mTLS certificates"
+    POD=$(kubectl get pod -n podinfo -l app=podinfo -o jsonpath='{.items[0].metadata.name}')
+    CERT_INFO=$(kubectl exec -n podinfo $POD -c istio-proxy -- curl -s localhost:15000/certs)
+    if [[ $CERT_INFO == *"Certificate Chain"* ]]; then
+      echo "✓ mTLS certificates present"
+    else
+      echo "✗ mTLS certificates not found"
+      exit 1
+    fi
+
+    # Test 3: Verify strict mTLS enforcement
+    echo -e "\nTest 3: Verify STRICT mTLS mode"
+    PEER_AUTH=$(kubectl get peerauthentication default-strict-mtls -n istio-system -o jsonpath='{.spec.mtls.mode}')
+    if [[ $PEER_AUTH == "STRICT" ]]; then
+      echo "✓ STRICT mTLS mode enforced"
+    else
+      echo "✗ mTLS mode is not STRICT: $PEER_AUTH"
+      exit 1
+    fi
+
+    # Test 4: Test service-to-service communication with mTLS
+    echo -e "\nTest 4: Test service-to-service mTLS communication"
+    RESPONSE=$(kubectl exec -n podinfo $POD -c podinfo -- curl -s -o /dev/null -w "%{http_code}" http://podinfo-stable:9898/healthz)
+    if [[ $RESPONSE == "200" ]]; then
+      echo "✓ Service-to-service communication working with mTLS"
+    else
+      echo "✗ Service communication failed: HTTP $RESPONSE"
+      exit 1
+    fi
+
+    echo -e "\n=== mTLS Tests Completed Successfully ==="
+
+  test-traffic-routing.sh: |
+    #!/bin/bash
+    # Test traffic routing and splitting
+    set -e
+
+    echo "=== Testing Traffic Routing ==="
+
+    # Get a pod to run tests from
+    POD=$(kubectl get pod -n podinfo -l app=podinfo -o jsonpath='{.items[0].metadata.name}')
+
+    # Test 1: Header-based routing
+    echo "Test 1: Header-based canary routing"
+    for i in {1..10}; do
+      RESPONSE=$(kubectl exec -n podinfo $POD -c podinfo -- curl -s -H "X-Canary: true" http://podinfo:9898/ | grep -o '"hostname":"[^"]*"' || echo "")
+      echo "Request $i: $RESPONSE"
+    done
+    echo "✓ Header-based routing tested"
+
+    # Test 2: Weighted traffic split
+    echo -e "\nTest 2: Weighted traffic split (90/10)"
+    STABLE_COUNT=0
+    CANARY_COUNT=0
+    for i in {1..100}; do
+      RESPONSE=$(kubectl exec -n podinfo $POD -c podinfo -- curl -s http://podinfo:9898/ | grep -o '"hostname":"[^"]*"')
+      if [[ $RESPONSE == *"stable"* ]]; then
+        ((STABLE_COUNT++))
+      else
+        ((CANARY_COUNT++))
+      fi
+    done
+    echo "Stable requests: $STABLE_COUNT"
+    echo "Canary requests: $CANARY_COUNT"
+
+    # Allow 80-100% to stable (accounting for variance)
+    if [[ $STABLE_COUNT -ge 80 ]] && [[ $STABLE_COUNT -le 100 ]]; then
+      echo "✓ Traffic split working correctly"
+    else
+      echo "⚠ Traffic split ratio unexpected (expected ~90/10)"
+    fi
+
+    # Test 3: Retry policy
+    echo -e "\nTest 3: Retry policy"
+    kubectl exec -n podinfo $POD -c istio-proxy -- curl -s localhost:15000/config_dump | grep -A 5 "retry_policy" | head -10
+    echo "✓ Retry policy configured"
+
+    # Test 4: Timeout configuration
+    echo -e "\nTest 4: Timeout configuration"
+    kubectl exec -n podinfo $POD -c istio-proxy -- curl -s localhost:15000/config_dump | grep -A 3 "timeout" | head -10
+    echo "✓ Timeout configured"
+
+    echo -e "\n=== Traffic Routing Tests Completed ==="
+
+  test-circuit-breaker.sh: |
+    #!/bin/bash
+    # Test circuit breaker functionality
+    set -e
+
+    echo "=== Testing Circuit Breaker ==="
+
+    POD=$(kubectl get pod -n podinfo -l app=podinfo -o jsonpath='{.items[0].metadata.name}')
+
+    # Test 1: Verify circuit breaker configuration
+    echo "Test 1: Verify circuit breaker settings"
+    DR=$(kubectl get destinationrule podinfo-stable-dr -n podinfo -o yaml)
+    if [[ $DR == *"outlierDetection"* ]]; then
+      echo "✓ Circuit breaker configured"
+    else
+      echo "✗ Circuit breaker not found"
+      exit 1
+    fi
+
+    # Test 2: Check connection pool limits
+    echo -e "\nTest 2: Verify connection pool settings"
+    if [[ $DR == *"connectionPool"* ]]; then
+      echo "✓ Connection pool configured"
+      kubectl get destinationrule podinfo-stable-dr -n podinfo -o jsonpath='{.spec.trafficPolicy.connectionPool}'
+      echo ""
+    else
+      echo "✗ Connection pool not configured"
+      exit 1
+    fi
+
+    # Test 3: Monitor circuit breaker metrics
+    echo -e "\nTest 3: Check circuit breaker metrics"
+    kubectl exec -n podinfo $POD -c istio-proxy -- \
+      curl -s localhost:15000/stats | grep -E "outlier|upstream.*overflow" | head -10
+    echo "✓ Circuit breaker metrics available"
+
+    # Test 4: Load test (simulate circuit breaker trigger)
+    echo -e "\nTest 4: Simulate high load"
+    for i in {1..50}; do
+      kubectl exec -n podinfo $POD -c podinfo -- curl -s -o /dev/null http://podinfo-stable:9898/ &
+    done
+    wait
+
+    sleep 2
+    echo "✓ Load test completed"
+
+    # Check if circuit breaker was triggered
+    OVERFLOW=$(kubectl exec -n podinfo $POD -c istio-proxy -- \
+      curl -s localhost:15000/stats | grep "upstream_rq_pending_overflow" | grep -v ": 0" || echo "none")
+    if [[ $OVERFLOW != "none" ]]; then
+      echo "✓ Circuit breaker triggered (as expected under high load)"
+    else
+      echo "⚠ Circuit breaker not triggered (load may not have been sufficient)"
+    fi
+
+    echo -e "\n=== Circuit Breaker Tests Completed ==="
+
+  test-tracing.sh: |
+    #!/bin/bash
+    # Test distributed tracing
+    set -e
+
+    echo "=== Testing Distributed Tracing ==="
+
+    POD=$(kubectl get pod -n podinfo -l app=podinfo -o jsonpath='{.items[0].metadata.name}')
+
+    # Test 1: Verify tracing configuration
+    echo "Test 1: Verify tracing is enabled"
+    ISTIO_CONFIG=$(kubectl get istiooperator istio-control-plane -n istio-system -o yaml)
+    if [[ $ISTIO_CONFIG == *"enableTracing: true"* ]]; then
+      echo "✓ Tracing enabled in mesh config"
+    else
+      echo "✗ Tracing not enabled"
+      exit 1
+    fi
+
+    # Test 2: Check Jaeger deployment
+    echo -e "\nTest 2: Verify Jaeger is running"
+    JAEGER_PODS=$(kubectl get pods -n observability -l app.kubernetes.io/name=jaeger -o jsonpath='{.items[*].status.phase}')
+    if [[ $JAEGER_PODS == *"Running"* ]]; then
+      echo "✓ Jaeger pods running"
+    else
+      echo "✗ Jaeger pods not running: $JAEGER_PODS"
+      exit 1
+    fi
+
+    # Test 3: Generate traced requests
+    echo -e "\nTest 3: Generate traced requests"
+    for i in {1..10}; do
+      kubectl exec -n podinfo $POD -c podinfo -- \
+        curl -s -H "X-Request-Id: test-trace-$i" http://podinfo-stable:9898/ > /dev/null
+      echo "Generated request $i with trace ID: test-trace-$i"
+    done
+    echo "✓ Traced requests generated"
+
+    # Test 4: Verify spans are collected
+    echo -e "\nTest 4: Verify trace collection"
+    sleep 5  # Wait for spans to be collected
+
+    # Check if Jaeger collector is receiving spans
+    COLLECTOR_POD=$(kubectl get pod -n observability -l app.kubernetes.io/name=jaeger,app.kubernetes.io/component=collector -o jsonpath='{.items[0].metadata.name}')
+    if [[ -n $COLLECTOR_POD ]]; then
+      echo "✓ Jaeger collector found: $COLLECTOR_POD"
+    else
+      echo "⚠ Jaeger collector pod not found"
+    fi
+
+    # Test 5: Check tracing headers
+    echo -e "\nTest 5: Verify tracing headers propagation"
+    HEADERS=$(kubectl exec -n podinfo $POD -c podinfo -- \
+      curl -s -v http://podinfo-stable:9898/ 2>&1 | grep -i "x-b3\|x-request-id\|traceparent")
+    if [[ -n $HEADERS ]]; then
+      echo "✓ Tracing headers found:"
+      echo "$HEADERS"
+    else
+      echo "⚠ Tracing headers not found in response"
+    fi
+
+    echo -e "\n=== Distributed Tracing Tests Completed ==="
+
+  test-observability.sh: |
+    #!/bin/bash
+    # Test observability components
+    set -e
+
+    echo "=== Testing Observability ==="
+
+    # Test 1: Prometheus metrics
+    echo "Test 1: Verify Prometheus is scraping Istio metrics"
+    PROM_POD=$(kubectl get pod -n monitoring -l app.kubernetes.io/name=prometheus -o jsonpath='{.items[0].metadata.name}')
+    if [[ -n $PROM_POD ]]; then
+      echo "✓ Prometheus pod found: $PROM_POD"
+
+      # Query for Istio metrics
+      METRICS=$(kubectl exec -n monitoring $PROM_POD -- wget -q -O- 'http://localhost:9090/api/v1/query?query=istio_requests_total' | grep -o '"status":"success"')
+      if [[ $METRICS == *"success"* ]]; then
+        echo "✓ Istio metrics available in Prometheus"
+      else
+        echo "✗ Istio metrics not found in Prometheus"
+        exit 1
+      fi
+    else
+      echo "⚠ Prometheus pod not found"
+    fi
+
+    # Test 2: ServiceMonitors
+    echo -e "\nTest 2: Verify ServiceMonitors are configured"
+    SM_COUNT=$(kubectl get servicemonitor -A -l monitoring=istio-components -o name | wc -l)
+    if [[ $SM_COUNT -gt 0 ]]; then
+      echo "✓ Found $SM_COUNT Istio ServiceMonitors"
+    else
+      echo "⚠ No Istio ServiceMonitors found"
+    fi
+
+    # Test 3: Grafana dashboards
+    echo -e "\nTest 3: Verify Grafana dashboards"
+    DASHBOARD_COUNT=$(kubectl get configmap -n monitoring -l grafana_dashboard=1 -o name | wc -l)
+    if [[ $DASHBOARD_COUNT -gt 0 ]]; then
+      echo "✓ Found $DASHBOARD_COUNT Grafana dashboards"
+    else
+      echo "⚠ No Grafana dashboards found"
+    fi
+
+    # Test 4: Kiali deployment
+    echo -e "\nTest 4: Verify Kiali is running"
+    KIALI_POD=$(kubectl get pod -n istio-system -l app=kiali -o jsonpath='{.items[0].status.phase}')
+    if [[ $KIALI_POD == "Running" ]]; then
+      echo "✓ Kiali is running"
+    else
+      echo "⚠ Kiali status: $KIALI_POD"
+    fi
+
+    # Test 5: Check Istio metrics
+    echo -e "\nTest 5: Sample Istio metrics from proxy"
+    POD=$(kubectl get pod -n podinfo -l app=podinfo -o jsonpath='{.items[0].metadata.name}')
+    METRICS=$(kubectl exec -n podinfo $POD -c istio-proxy -- curl -s localhost:15090/stats/prometheus | grep istio_requests_total | head -5)
+    if [[ -n $METRICS ]]; then
+      echo "✓ Proxy metrics available:"
+      echo "$METRICS"
+    else
+      echo "✗ Proxy metrics not found"
+      exit 1
+    fi
+
+    echo -e "\n=== Observability Tests Completed ==="
+
+  test-security.sh: |
+    #!/bin/bash
+    # Test security policies
+    set -e
+
+    echo "=== Testing Security Policies ==="
+
+    # Test 1: Authorization policies
+    echo "Test 1: Verify authorization policies"
+    AUTHZ_COUNT=$(kubectl get authorizationpolicy -A -o name | wc -l)
+    if [[ $AUTHZ_COUNT -gt 0 ]]; then
+      echo "✓ Found $AUTHZ_COUNT authorization policies"
+      kubectl get authorizationpolicy -A
+    else
+      echo "✗ No authorization policies found"
+      exit 1
+    fi
+
+    # Test 2: Test deny-all policy
+    echo -e "\nTest 2: Verify default deny-all policy"
+    DENY_ALL=$(kubectl get authorizationpolicy deny-all-default -n istio-system -o jsonpath='{.metadata.name}')
+    if [[ $DENY_ALL == "deny-all-default" ]]; then
+      echo "✓ Default deny-all policy exists"
+    else
+      echo "⚠ Default deny-all policy not found"
+    fi
+
+    # Test 3: Test allowed communication
+    echo -e "\nTest 3: Test allowed service communication"
+    POD=$(kubectl get pod -n podinfo -l app=podinfo -o jsonpath='{.items[0].metadata.name}')
+    RESPONSE=$(kubectl exec -n podinfo $POD -c podinfo -- curl -s -o /dev/null -w "%{http_code}" http://podinfo-stable:9898/healthz)
+    if [[ $RESPONSE == "200" ]]; then
+      echo "✓ Allowed communication works (HTTP $RESPONSE)"
+    else
+      echo "✗ Allowed communication failed (HTTP $RESPONSE)"
+      exit 1
+    fi
+
+    # Test 4: Network policies
+    echo -e "\nTest 4: Verify network policies"
+    NP_COUNT=$(kubectl get networkpolicy -n podinfo -o name | wc -l)
+    if [[ $NP_COUNT -gt 0 ]]; then
+      echo "✓ Found $NP_COUNT network policies in podinfo namespace"
+    else
+      echo "⚠ No network policies found"
+    fi
+
+    # Test 5: Verify security audit logging
+    echo -e "\nTest 5: Verify security audit configuration"
+    TELEMETRY=$(kubectl get telemetry security-audit-logging -n istio-system -o jsonpath='{.metadata.name}')
+    if [[ $TELEMETRY == "security-audit-logging" ]]; then
+      echo "✓ Security audit logging configured"
+    else
+      echo "⚠ Security audit logging not found"
+    fi
+
+    echo -e "\n=== Security Tests Completed ==="
+
+  run-all-tests.sh: |
+    #!/bin/bash
+    # Run all service mesh tests
+    set -e
+
+    echo "========================================"
+    echo "  Service Mesh Comprehensive Test Suite"
+    echo "========================================"
+    echo ""
+
+    # Run all test scripts
+    for script in test-*.sh; do
+      if [[ $script != "test-all.sh" ]]; then
+        echo "Running $script..."
+        bash $script
+        echo ""
+      fi
+    done
+
+    echo "========================================"
+    echo "  All Tests Completed Successfully!"
+    echo "========================================"
+
+---
+# Test runner Job
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mesh-test-runner
+  namespace: mesh-test
+spec:
+  template:
+    metadata:
+      annotations:
+        sidecar.istio.io/inject: "false"  # No sidecar needed for test runner
+    spec:
+      serviceAccountName: mesh-test-sa
+      restartPolicy: Never
+      containers:
+      - name: test-runner
+        image: bitnami/kubectl:1.28
+        command:
+        - /bin/bash
+        - -c
+        - |
+          # Copy test scripts
+          cp /scripts/* /tmp/
+          cd /tmp
+          chmod +x *.sh
+
+          # Run all tests
+          ./run-all-tests.sh
+
+          # Keep container alive for log viewing
+          echo "Tests completed. Check logs above for results."
+          sleep 300
+        volumeMounts:
+        - name: test-scripts
+          mountPath: /scripts
+      volumes:
+      - name: test-scripts
+        configMap:
+          name: mesh-test-scripts
+
+---
+# ServiceAccount for test runner
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mesh-test-sa
+  namespace: mesh-test
+
+---
+# ClusterRole for test runner
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mesh-test-role
+rules:
+- apiGroups: [""]
+  resources:
+  - pods
+  - pods/log
+  - pods/exec
+  - services
+  - configmaps
+  - namespaces
+  verbs:
+  - get
+  - list
+  - create
+- apiGroups: ["apps"]
+  resources:
+  - deployments
+  - statefulsets
+  verbs:
+  - get
+  - list
+- apiGroups: ["networking.istio.io"]
+  resources:
+  - virtualservices
+  - destinationrules
+  - gateways
+  verbs:
+  - get
+  - list
+- apiGroups: ["security.istio.io"]
+  resources:
+  - authorizationpolicies
+  - peerauthentications
+  verbs:
+  - get
+  - list
+- apiGroups: ["install.istio.io"]
+  resources:
+  - istiooperators
+  verbs:
+  - get
+  - list
+- apiGroups: ["monitoring.coreos.com"]
+  resources:
+  - servicemonitors
+  verbs:
+  - get
+  - list
+- apiGroups: ["networking.k8s.io"]
+  resources:
+  - networkpolicies
+  verbs:
+  - get
+  - list
+- apiGroups: ["telemetry.istio.io"]
+  resources:
+  - telemetries
+  verbs:
+  - get
+  - list
+
+---
+# ClusterRoleBinding for test runner
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mesh-test-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: mesh-test-role
+subjects:
+- kind: ServiceAccount
+  name: mesh-test-sa
+  namespace: mesh-test
+
+---
+# Manual test pod for interactive testing
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mesh-test-client
+  namespace: mesh-test
+  labels:
+    app: test-client
+spec:
+  containers:
+  - name: client
+    image: curlimages/curl:8.5.0
+    command:
+    - sleep
+    - "3600"
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 128Mi

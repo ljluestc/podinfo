@@ -1,0 +1,415 @@
+# Webhook Token Authentication
+# Allows external authentication systems to validate bearer tokens
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: auth-system
+
+---
+# Webhook Authentication Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: webhook-token-auth
+  namespace: auth-system
+spec:
+  selector:
+    app: webhook-token-auth
+  ports:
+  - name: https
+    port: 443
+    targetPort: 8443
+    protocol: TCP
+  type: ClusterIP
+
+---
+# Webhook Authentication Server Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webhook-token-auth
+  namespace: auth-system
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: webhook-token-auth
+  template:
+    metadata:
+      labels:
+        app: webhook-token-auth
+    spec:
+      serviceAccountName: webhook-token-auth
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: webhook-server
+        image: registry.k8s.io/kube-webhook-certgen:v1.4.0  # Replace with actual webhook auth image
+        imagePullPolicy: IfNotPresent
+        command:
+        - /webhook-server
+        - --tls-cert-file=/etc/webhook/certs/tls.crt
+        - --tls-key-file=/etc/webhook/certs/tls.key
+        - --port=8443
+        ports:
+        - name: https
+          containerPort: 8443
+        env:
+        # Token validation backend
+        - name: TOKEN_VALIDATION_ENDPOINT
+          value: "https://external-idp.example.com/validate"
+        # Redis cache for token validation results
+        - name: REDIS_HOST
+          value: "redis.auth-system.svc.cluster.local:6379"
+        - name: CACHE_TTL
+          value: "300"  # 5 minutes
+        volumeMounts:
+        - name: webhook-certs
+          mountPath: /etc/webhook/certs
+          readOnly: true
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8443
+            scheme: HTTPS
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8443
+            scheme: HTTPS
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: webhook-certs
+        secret:
+          secretName: webhook-token-auth-certs
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - webhook-token-auth
+              topologyKey: kubernetes.io/hostname
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: webhook-token-auth
+  namespace: auth-system
+
+---
+# Redis cache for token validation (optional, improves performance)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: auth-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        fsGroup: 999
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: redis
+          containerPort: 6379
+        resources:
+          limits:
+            cpu: 200m
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: data
+        emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: auth-system
+spec:
+  selector:
+    app: redis
+  ports:
+  - name: redis
+    port: 6379
+    targetPort: 6379
+  type: ClusterIP
+
+---
+# Webhook Token Authentication Configuration for kube-apiserver
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: webhook-token-auth-config
+  namespace: kube-system
+data:
+  webhook-config.yaml: |
+    # Webhook configuration for token authentication
+    apiVersion: v1
+    kind: Config
+    clusters:
+    - name: webhook-token-auth
+      cluster:
+        certificate-authority: /etc/kubernetes/pki/webhook-ca.crt
+        server: https://webhook-token-auth.auth-system.svc.cluster.local/authenticate
+    users:
+    - name: kube-apiserver
+      user: {}
+    current-context: webhook
+    contexts:
+    - name: webhook
+      context:
+        cluster: webhook-token-auth
+        user: kube-apiserver
+
+  apiserver-webhook-flags.conf: |
+    # Add these flags to kube-apiserver configuration
+    --authentication-token-webhook-config-file=/etc/kubernetes/auth/webhook-config.yaml
+    --authentication-token-webhook-cache-ttl=2m
+
+  setup-instructions.md: |
+    # Webhook Token Authentication Setup
+
+    ## Prerequisites:
+    1. Deploy the webhook authentication service
+    2. Generate TLS certificates for the webhook
+    3. Configure kube-apiserver to use webhook authentication
+
+    ## Steps:
+
+    ### 1. Generate webhook certificates:
+    ```bash
+    # Create CA
+    openssl genrsa -out webhook-ca.key 4096
+    openssl req -x509 -new -nodes -key webhook-ca.key \
+      -subj "/CN=webhook-ca" -days 3650 -out webhook-ca.crt
+
+    # Create webhook server certificate
+    openssl genrsa -out webhook-server.key 2048
+    openssl req -new -key webhook-server.key \
+      -subj "/CN=webhook-token-auth.auth-system.svc" \
+      -out webhook-server.csr
+
+    # Sign the certificate
+    openssl x509 -req -in webhook-server.csr \
+      -CA webhook-ca.crt -CAkey webhook-ca.key -CAcreateserial \
+      -out webhook-server.crt -days 3650 \
+      -extensions v3_ext -extfile <(cat <<EOF
+    [v3_ext]
+    keyUsage=critical,digitalSignature,keyEncipherment
+    extendedKeyUsage=serverAuth
+    subjectAltName=DNS:webhook-token-auth.auth-system.svc,DNS:webhook-token-auth.auth-system.svc.cluster.local
+    EOF
+    )
+
+    # Create Kubernetes secret
+    kubectl create secret tls webhook-token-auth-certs \
+      --cert=webhook-server.crt \
+      --key=webhook-server.key \
+      -n auth-system
+
+    # Copy CA to apiserver
+    sudo cp webhook-ca.crt /etc/kubernetes/pki/webhook-ca.crt
+    ```
+
+    ### 2. Deploy webhook service:
+    ```bash
+    kubectl apply -f webhook-token-auth.yaml
+    ```
+
+    ### 3. Configure kube-apiserver:
+    ```bash
+    # Copy webhook config
+    sudo mkdir -p /etc/kubernetes/auth
+    kubectl get configmap webhook-token-auth-config -n kube-system \
+      -o jsonpath='{.data.webhook-config\.yaml}' | \
+      sudo tee /etc/kubernetes/auth/webhook-config.yaml
+
+    # Edit kube-apiserver manifest
+    sudo vi /etc/kubernetes/manifests/kube-apiserver.yaml
+    # Add flags and volume mounts as shown in the config
+    ```
+
+    ### 4. Verify:
+    ```bash
+    # Test with bearer token
+    curl -k https://kubernetes-api-endpoint:6443/api/v1/namespaces \
+      -H "Authorization: Bearer YOUR_CUSTOM_TOKEN"
+    ```
+
+---
+# Example webhook authentication server implementation
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: webhook-server-example
+  namespace: auth-system
+data:
+  main.go: |
+    // Example webhook authentication server in Go
+    package main
+
+    import (
+        "crypto/tls"
+        "encoding/json"
+        "fmt"
+        "io/ioutil"
+        "net/http"
+        "time"
+
+        authentication "k8s.io/api/authentication/v1beta1"
+    )
+
+    type WebhookServer struct {
+        cache map[string]*CacheEntry
+    }
+
+    type CacheEntry struct {
+        authenticated bool
+        user          *authentication.UserInfo
+        expiry        time.Time
+    }
+
+    func (s *WebhookServer) authenticate(w http.ResponseWriter, r *http.Request) {
+        body, err := ioutil.ReadAll(r.Body)
+        if err != nil {
+            http.Error(w, "Failed to read request body", http.StatusBadRequest)
+            return
+        }
+
+        var tokenReview authentication.TokenReview
+        if err := json.Unmarshal(body, &tokenReview); err != nil {
+            http.Error(w, "Failed to parse token review", http.StatusBadRequest)
+            return
+        }
+
+        token := tokenReview.Spec.Token
+
+        // Check cache
+        if entry, ok := s.cache[token]; ok && time.Now().Before(entry.expiry) {
+            tokenReview.Status.Authenticated = entry.authenticated
+            tokenReview.Status.User = *entry.user
+            s.writeResponse(w, tokenReview)
+            return
+        }
+
+        // Validate token with external IDP
+        authenticated, user, err := s.validateToken(token)
+        if err != nil {
+            tokenReview.Status.Authenticated = false
+            s.writeResponse(w, tokenReview)
+            return
+        }
+
+        // Cache result
+        s.cache[token] = &CacheEntry{
+            authenticated: authenticated,
+            user:          user,
+            expiry:        time.Now().Add(5 * time.Minute),
+        }
+
+        tokenReview.Status.Authenticated = authenticated
+        tokenReview.Status.User = *user
+        s.writeResponse(w, tokenReview)
+    }
+
+    func (s *WebhookServer) validateToken(token string) (bool, *authentication.UserInfo, error) {
+        // TODO: Implement token validation against external IDP
+        // Example: call external OAuth2 introspection endpoint
+
+        // Mock implementation
+        if token == "valid-token" {
+            return true, &authentication.UserInfo{
+                Username: "external-user",
+                UID:      "external-uid",
+                Groups:   []string{"developers", "external-users"},
+            }, nil
+        }
+        return false, nil, fmt.Errorf("invalid token")
+    }
+
+    func (s *WebhookServer) writeResponse(w http.ResponseWriter, review authentication.TokenReview) {
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(review)
+    }
+
+    func main() {
+        server := &WebhookServer{
+            cache: make(map[string]*CacheEntry),
+        }
+
+        http.HandleFunc("/authenticate", server.authenticate)
+        http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+            w.WriteHeader(http.StatusOK)
+            w.Write([]byte("ok"))
+        })
+
+        // Load TLS certificates
+        cert, err := tls.LoadX509KeyPair("/etc/webhook/certs/tls.crt", "/etc/webhook/certs/tls.key")
+        if err != nil {
+            panic(err)
+        }
+
+        server := &http.Server{
+            Addr:      ":8443",
+            TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}},
+        }
+
+        fmt.Println("Webhook authentication server listening on :8443")
+        if err := server.ListenAndServeTLS("", ""); err != nil {
+            panic(err)
+        }
+    }

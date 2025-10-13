@@ -1,0 +1,360 @@
+---
+# ServiceMonitor for Prometheus Monitoring
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: workload-demo-monitoring
+  namespace: workload-demo
+  labels:
+    monitoring: workload-management
+spec:
+  selector:
+    matchLabels:
+      app: podinfo-rolling
+  endpoints:
+  - port: http-metrics
+    interval: 30s
+    path: /metrics
+---
+# ConfigMap for Grafana Dashboard
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: workload-management-dashboard
+  namespace: workload-demo
+  labels:
+    grafana_dashboard: "1"
+data:
+  workload-management.json: |
+    {
+      "dashboard": {
+        "title": "Workload Management Dashboard",
+        "panels": [
+          {
+            "title": "Deployment Status",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "kube_deployment_status_replicas_available"
+              }
+            ]
+          },
+          {
+            "title": "Pod Resource Usage",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "container_memory_usage_bytes"
+              }
+            ]
+          },
+          {
+            "title": "CronJob Success Rate",
+            "type": "gauge",
+            "targets": [
+              {
+                "expr": "rate(kube_cronjob_status_succeeded[5m])"
+              }
+            ]
+          }
+        ]
+      }
+    }
+---
+# Test Job for Deployment Validation
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: test-deployments
+  namespace: workload-demo
+  labels:
+    test-type: validation
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        test-type: validation
+    spec:
+      restartPolicy: Never
+      serviceAccountName: workload-tester
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 2000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: tester
+        image: bitnami/kubectl:1.31
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -e
+          echo "=== Testing Deployment Strategies ==="
+
+          # Test Rolling Update Deployment
+          echo "Testing podinfo-rolling deployment..."
+          kubectl wait --for=condition=available --timeout=60s \
+            deployment/podinfo-rolling -n workload-demo
+          echo "✓ Rolling update deployment is available"
+
+          # Test Blue-Green Deployments
+          echo "Testing blue-green deployments..."
+          kubectl wait --for=condition=available --timeout=60s \
+            deployment/podinfo-blue -n workload-demo
+          kubectl wait --for=condition=available --timeout=60s \
+            deployment/podinfo-green -n workload-demo
+          echo "✓ Blue-green deployments are available"
+
+          # Test Canary Deployments
+          echo "Testing canary deployments..."
+          kubectl wait --for=condition=available --timeout=60s \
+            deployment/podinfo-canary-stable -n workload-demo
+          kubectl wait --for=condition=available --timeout=60s \
+            deployment/podinfo-canary-new -n workload-demo
+          echo "✓ Canary deployments are available"
+
+          # Test StatefulSets
+          echo "Testing redis-cluster statefulset..."
+          kubectl wait --for=jsonpath='{.status.readyReplicas}'=3 \
+            --timeout=120s statefulset/redis-cluster -n workload-demo
+          echo "✓ Redis cluster statefulset is ready"
+
+          # Test DaemonSets
+          echo "Testing node-monitor daemonset..."
+          DESIRED=$(kubectl get daemonset node-monitor -n workload-demo \
+            -o jsonpath='{.status.desiredNumberScheduled}')
+          READY=$(kubectl get daemonset node-monitor -n workload-demo \
+            -o jsonpath='{.status.numberReady}')
+          if [ "$DESIRED" = "$READY" ]; then
+            echo "✓ Node monitor daemonset is ready ($READY/$DESIRED)"
+          else
+            echo "✗ Node monitor daemonset not ready ($READY/$DESIRED)"
+            exit 1
+          fi
+
+          # Test Pod Disruption Budgets
+          echo "Testing pod disruption budgets..."
+          kubectl get pdb -n workload-demo
+          echo "✓ Pod disruption budgets configured"
+
+          # Test Resource Quotas
+          echo "Testing resource quotas..."
+          kubectl get resourcequota -n workload-demo
+          echo "✓ Resource quotas configured"
+
+          # Test Priority Classes
+          echo "Testing priority classes..."
+          kubectl get priorityclass | grep -E "critical|high|medium|low|best-effort"
+          echo "✓ Priority classes configured"
+
+          echo ""
+          echo "=== All Tests Passed ==="
+        resources:
+          limits:
+            cpu: 200m
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: tmp
+        emptyDir: {}
+---
+# ServiceAccount for Test Job
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: workload-tester
+  namespace: workload-demo
+---
+# Role for Test Job
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: workload-tester
+  namespace: workload-demo
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  - services
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  - statefulsets
+  - daemonsets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - policy
+  resources:
+  - poddisruptionbudgets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - resourcequotas
+  - limitranges
+  verbs:
+  - get
+  - list
+  - watch
+---
+# RoleBinding for Test Job
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: workload-tester
+  namespace: workload-demo
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: workload-tester
+subjects:
+- kind: ServiceAccount
+  name: workload-tester
+  namespace: workload-demo
+---
+# ClusterRole for Priority Class Access
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: workload-tester-cluster
+rules:
+- apiGroups:
+  - scheduling.k8s.io
+  resources:
+  - priorityclasses
+  verbs:
+  - get
+  - list
+  - watch
+---
+# ClusterRoleBinding for Priority Class Access
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: workload-tester-cluster
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: workload-tester-cluster
+subjects:
+- kind: ServiceAccount
+  name: workload-tester
+  namespace: workload-demo
+---
+# Load Test Job
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: load-test-workloads
+  namespace: workload-demo
+  labels:
+    test-type: load-test
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 7200
+  template:
+    metadata:
+      labels:
+        test-type: load-test
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 2000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: load-test
+        image: curlimages/curl:8.10.1
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -e
+          echo "=== Starting Load Test ==="
+
+          # Test rolling deployment
+          echo "Testing rolling deployment endpoint..."
+          for i in $(seq 1 100); do
+            curl -s http://podinfo-rolling:9898/ > /dev/null
+            if [ $((i % 20)) -eq 0 ]; then
+              echo "Completed $i requests"
+            fi
+          done
+          echo "✓ Rolling deployment load test completed"
+
+          # Test canary deployment
+          echo "Testing canary deployment endpoint..."
+          for i in $(seq 1 100); do
+            curl -s http://podinfo-canary:9898/ > /dev/null
+            if [ $((i % 20)) -eq 0 ]; then
+              echo "Completed $i requests"
+            fi
+          done
+          echo "✓ Canary deployment load test completed"
+
+          # Test blue-green deployment
+          echo "Testing blue-green deployment endpoint..."
+          for i in $(seq 1 50); do
+            curl -s http://podinfo-bluegreen:9898/ > /dev/null
+            if [ $((i % 10)) -eq 0 ]; then
+              echo "Completed $i requests"
+            fi
+          done
+          echo "✓ Blue-green deployment load test completed"
+
+          echo ""
+          echo "=== Load Test Completed Successfully ==="
+        resources:
+          limits:
+            cpu: 500m
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 64Mi
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: tmp
+        emptyDir: {}

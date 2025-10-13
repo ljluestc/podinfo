@@ -1,0 +1,266 @@
+---
+# Rolling Update Deployment with Enhanced Health Checks
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: podinfo-rolling
+  namespace: workload-demo
+  labels:
+    app: podinfo-rolling
+    strategy: rolling-update
+spec:
+  replicas: 3
+  minReadySeconds: 10
+  revisionHistoryLimit: 10
+  progressDeadlineSeconds: 600
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: podinfo-rolling
+  template:
+    metadata:
+      labels:
+        app: podinfo-rolling
+        version: v1
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9797"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 2000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: podinfo
+        image: ghcr.io/stefanprodan/podinfo:6.9.2
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL
+        ports:
+        - name: http
+          containerPort: 9898
+          protocol: TCP
+        - name: http-metrics
+          containerPort: 9797
+          protocol: TCP
+        - name: grpc
+          containerPort: 9999
+          protocol: TCP
+        command:
+        - ./podinfo
+        - --port=9898
+        - --port-metrics=9797
+        - --grpc-port=9999
+        - --level=info
+        env:
+        - name: PODINFO_UI_COLOR
+          value: "#34577c"
+        # Enhanced Liveness Probe
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 9898
+            httpHeaders:
+            - name: X-Health-Check
+              value: liveness
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
+        # Enhanced Readiness Probe
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 9898
+            httpHeaders:
+            - name: X-Health-Check
+              value: readiness
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          successThreshold: 1
+          failureThreshold: 3
+        # Startup Probe for slow-starting containers
+        startupProbe:
+          httpGet:
+            path: /healthz
+            port: 9898
+          initialDelaySeconds: 0
+          periodSeconds: 5
+          timeoutSeconds: 3
+          successThreshold: 1
+          failureThreshold: 30
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 64Mi
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: data
+        emptyDir: {}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - podinfo-rolling
+              topologyKey: kubernetes.io/hostname
+      terminationGracePeriodSeconds: 30
+---
+# Service for Rolling Update Deployment
+apiVersion: v1
+kind: Service
+metadata:
+  name: podinfo-rolling
+  namespace: workload-demo
+  labels:
+    app: podinfo-rolling
+spec:
+  type: ClusterIP
+  selector:
+    app: podinfo-rolling
+  ports:
+  - name: http
+    port: 9898
+    protocol: TCP
+    targetPort: http
+  - name: grpc
+    port: 9999
+    protocol: TCP
+    targetPort: grpc
+---
+# Recreate Strategy Deployment (for stateful or incompatible versions)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: podinfo-recreate
+  namespace: workload-demo
+  labels:
+    app: podinfo-recreate
+    strategy: recreate
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: podinfo-recreate
+  template:
+    metadata:
+      labels:
+        app: podinfo-recreate
+        version: v1
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9797"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 2000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: podinfo
+        image: ghcr.io/stefanprodan/podinfo:6.9.2
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL
+        ports:
+        - name: http
+          containerPort: 9898
+          protocol: TCP
+        - name: http-metrics
+          containerPort: 9797
+          protocol: TCP
+        command:
+        - ./podinfo
+        - --port=9898
+        - --port-metrics=9797
+        - --level=info
+        env:
+        - name: PODINFO_UI_COLOR
+          value: "#a52a2a"
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 9898
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 9898
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 64Mi
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: data
+        emptyDir: {}
+---
+# Service for Recreate Deployment
+apiVersion: v1
+kind: Service
+metadata:
+  name: podinfo-recreate
+  namespace: workload-demo
+  labels:
+    app: podinfo-recreate
+spec:
+  type: ClusterIP
+  selector:
+    app: podinfo-recreate
+  ports:
+  - name: http
+    port: 9898
+    protocol: TCP
+    targetPort: http

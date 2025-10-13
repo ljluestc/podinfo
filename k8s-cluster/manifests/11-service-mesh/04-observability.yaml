@@ -1,0 +1,640 @@
+---
+# Service Mesh Observability Configuration
+# This file configures comprehensive monitoring, metrics collection,
+# and visualization for the Istio service mesh.
+
+# ServiceMonitor for Istio control plane metrics
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: istio-component-monitor
+  namespace: istio-system
+  labels:
+    monitoring: istio-components
+    release: prometheus
+spec:
+  jobLabel: istio
+  selector:
+    matchExpressions:
+    - key: istio
+      operator: In
+      values:
+      - pilot
+      - galley
+      - citadel
+      - mixer
+  namespaceSelector:
+    matchNames:
+    - istio-system
+  endpoints:
+  - port: http-monitoring
+    interval: 30s
+    path: /metrics
+
+---
+# ServiceMonitor for Envoy sidecar metrics
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: envoy-stats-monitor
+  namespace: istio-system
+  labels:
+    monitoring: istio-proxies
+    release: prometheus
+spec:
+  selector:
+    matchExpressions:
+    - key: istio-prometheus-ignore
+      operator: DoesNotExist
+  namespaceSelector:
+    any: true
+  jobLabel: envoy-stats
+  endpoints:
+  - path: /stats/prometheus
+    interval: 30s
+    relabelings:
+    - sourceLabels: [__meta_kubernetes_pod_container_port_name]
+      action: keep
+      regex: '.*-envoy-prom'
+    - sourceLabels: [__meta_kubernetes_pod_name]
+      targetLabel: pod_name
+    - sourceLabels: [__meta_kubernetes_namespace]
+      targetLabel: namespace
+    - sourceLabels: [__meta_kubernetes_pod_label_app]
+      targetLabel: app
+    - sourceLabels: [__meta_kubernetes_pod_label_version]
+      targetLabel: version
+
+---
+# PodMonitor for application metrics with Istio
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: podinfo-monitor
+  namespace: podinfo
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: podinfo
+  podMetricsEndpoints:
+  - port: http-metrics
+    interval: 30s
+    path: /metrics
+    relabelings:
+    - sourceLabels: [__meta_kubernetes_pod_name]
+      targetLabel: pod
+    - sourceLabels: [__meta_kubernetes_pod_label_version]
+      targetLabel: version
+    - sourceLabels: [__meta_kubernetes_namespace]
+      targetLabel: namespace
+
+---
+# PrometheusRule for Istio-specific alerts
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: istio-alerts
+  namespace: istio-system
+  labels:
+    release: prometheus
+spec:
+  groups:
+  - name: istio.rules
+    interval: 30s
+    rules:
+    # High 5xx error rate
+    - alert: High5xxErrorRate
+      expr: |
+        sum(rate(istio_requests_total{response_code=~"5.."}[5m]))
+        /
+        sum(rate(istio_requests_total[5m])) > 0.05
+      for: 5m
+      labels:
+        severity: warning
+        component: istio
+      annotations:
+        summary: "High 5xx error rate in service mesh"
+        description: "5xx error rate is {{ $value | humanizePercentage }} (threshold: 5%)"
+        runbook_url: "https://runbooks.example.com/istio/high-error-rate"
+
+    # High request latency
+    - alert: HighRequestLatency
+      expr: |
+        histogram_quantile(0.99,
+          sum(rate(istio_request_duration_milliseconds_bucket[5m])) by (le, destination_service_name)
+        ) > 1000
+      for: 10m
+      labels:
+        severity: warning
+        component: istio
+      annotations:
+        summary: "High request latency detected"
+        description: "P99 latency for {{ $labels.destination_service_name }} is {{ $value }}ms"
+        runbook_url: "https://runbooks.example.com/istio/high-latency"
+
+    # mTLS certificate expiration
+    - alert: CertificateExpiringSoon
+      expr: |
+        (citadel_server_root_cert_expiry_timestamp - time()) / 86400 < 30
+      for: 1h
+      labels:
+        severity: critical
+        component: istio-security
+      annotations:
+        summary: "Istio root certificate expiring soon"
+        description: "Root certificate will expire in {{ $value }} days"
+        runbook_url: "https://runbooks.example.com/istio/cert-expiry"
+
+    # Pilot push errors
+    - alert: PilotPushErrors
+      expr: |
+        rate(pilot_xds_push_errors[5m]) > 0.1
+      for: 5m
+      labels:
+        severity: warning
+        component: istio-pilot
+      annotations:
+        summary: "Istio Pilot experiencing push errors"
+        description: "Pilot push error rate: {{ $value | humanize }}/s"
+
+    # Control plane unavailable
+    - alert: IstioControlPlaneUnavailable
+      expr: |
+        up{job="istiod"} == 0
+      for: 1m
+      labels:
+        severity: critical
+        component: istio-control-plane
+      annotations:
+        summary: "Istio control plane is unavailable"
+        description: "Istiod instance {{ $labels.instance }} is down"
+
+    # High proxy resource usage
+    - alert: HighProxyMemoryUsage
+      expr: |
+        container_memory_working_set_bytes{container="istio-proxy"}
+        /
+        container_spec_memory_limit_bytes{container="istio-proxy"} > 0.9
+      for: 10m
+      labels:
+        severity: warning
+        component: istio-proxy
+      annotations:
+        summary: "High memory usage in Istio proxy"
+        description: "Pod {{ $labels.pod }} proxy using {{ $value | humanizePercentage }} of memory limit"
+
+    # Circuit breaker triggered
+    - alert: CircuitBreakerTriggered
+      expr: |
+        rate(envoy_cluster_upstream_rq_pending_overflow[5m]) > 0
+      for: 5m
+      labels:
+        severity: warning
+        component: istio-traffic
+      annotations:
+        summary: "Circuit breaker triggered for service"
+        description: "Circuit breaker for {{ $labels.cluster_name }} triggered {{ $value }} times/s"
+
+    # Gateway unhealthy
+    - alert: IstioGatewayUnhealthy
+      expr: |
+        sum(up{app="istio-ingressgateway"}) < 1
+      for: 1m
+      labels:
+        severity: critical
+        component: istio-gateway
+      annotations:
+        summary: "Istio ingress gateway unhealthy"
+        description: "No healthy istio-ingressgateway instances"
+
+---
+# Grafana Dashboard ConfigMap for Istio Service Mesh
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: istio-mesh-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  istio-mesh-dashboard.json: |
+    {
+      "dashboard": {
+        "title": "Istio Service Mesh Overview",
+        "tags": ["istio", "service-mesh"],
+        "timezone": "browser",
+        "refresh": "30s",
+        "panels": [
+          {
+            "title": "Global Request Rate",
+            "type": "graph",
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+            "targets": [
+              {
+                "expr": "round(sum(rate(istio_requests_total[1m])), 0.001)",
+                "legendFormat": "Requests/sec",
+                "refId": "A"
+              }
+            ]
+          },
+          {
+            "title": "Global Success Rate",
+            "type": "graph",
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+            "targets": [
+              {
+                "expr": "sum(rate(istio_requests_total{response_code!~\"5..\"}[1m])) / sum(rate(istio_requests_total[1m]))",
+                "legendFormat": "Success Rate",
+                "refId": "A"
+              }
+            ]
+          },
+          {
+            "title": "Request Duration (P50, P90, P99)",
+            "type": "graph",
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+            "targets": [
+              {
+                "expr": "histogram_quantile(0.50, sum(rate(istio_request_duration_milliseconds_bucket[1m])) by (le))",
+                "legendFormat": "P50",
+                "refId": "A"
+              },
+              {
+                "expr": "histogram_quantile(0.90, sum(rate(istio_request_duration_milliseconds_bucket[1m])) by (le))",
+                "legendFormat": "P90",
+                "refId": "B"
+              },
+              {
+                "expr": "histogram_quantile(0.99, sum(rate(istio_request_duration_milliseconds_bucket[1m])) by (le))",
+                "legendFormat": "P99",
+                "refId": "C"
+              }
+            ]
+          },
+          {
+            "title": "Request Size",
+            "type": "graph",
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+            "targets": [
+              {
+                "expr": "sum(rate(istio_request_bytes_sum[1m])) / sum(rate(istio_request_bytes_count[1m]))",
+                "legendFormat": "Avg Request Size",
+                "refId": "A"
+              }
+            ]
+          },
+          {
+            "title": "Services by Request Rate",
+            "type": "graph",
+            "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16},
+            "targets": [
+              {
+                "expr": "topk(10, sum(rate(istio_requests_total[1m])) by (destination_service_name))",
+                "legendFormat": "{{destination_service_name}}",
+                "refId": "A"
+              }
+            ]
+          },
+          {
+            "title": "TCP Connections",
+            "type": "graph",
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+            "targets": [
+              {
+                "expr": "sum(istio_tcp_connections_opened_total) by (destination_service_name)",
+                "legendFormat": "{{destination_service_name}}",
+                "refId": "A"
+              }
+            ]
+          },
+          {
+            "title": "mTLS Status",
+            "type": "stat",
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+            "targets": [
+              {
+                "expr": "sum(istio_requests_total{connection_security_policy=\"mutual_tls\"}) / sum(istio_requests_total)",
+                "legendFormat": "mTLS Traffic %",
+                "refId": "A"
+              }
+            ]
+          }
+        ]
+      }
+    }
+
+---
+# Grafana Dashboard for Podinfo Service
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: podinfo-service-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  podinfo-dashboard.json: |
+    {
+      "dashboard": {
+        "title": "Podinfo Service Metrics",
+        "tags": ["podinfo", "canary"],
+        "timezone": "browser",
+        "refresh": "10s",
+        "panels": [
+          {
+            "title": "Request Rate by Version",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "sum(rate(istio_requests_total{destination_service_name=\"podinfo-stable\"}[1m])) by (destination_version)",
+                "legendFormat": "Stable",
+                "refId": "A"
+              },
+              {
+                "expr": "sum(rate(istio_requests_total{destination_service_name=\"podinfo-canary\"}[1m])) by (destination_version)",
+                "legendFormat": "Canary",
+                "refId": "B"
+              }
+            ]
+          },
+          {
+            "title": "Error Rate by Version",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "sum(rate(istio_requests_total{destination_service_name=\"podinfo-stable\",response_code=~\"5..\"}[1m])) / sum(rate(istio_requests_total{destination_service_name=\"podinfo-stable\"}[1m]))",
+                "legendFormat": "Stable Error Rate",
+                "refId": "A"
+              },
+              {
+                "expr": "sum(rate(istio_requests_total{destination_service_name=\"podinfo-canary\",response_code=~\"5..\"}[1m])) / sum(rate(istio_requests_total{destination_service_name=\"podinfo-canary\"}[1m]))",
+                "legendFormat": "Canary Error Rate",
+                "refId": "B"
+              }
+            ]
+          },
+          {
+            "title": "P95 Latency Comparison",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "histogram_quantile(0.95, sum(rate(istio_request_duration_milliseconds_bucket{destination_service_name=\"podinfo-stable\"}[1m])) by (le))",
+                "legendFormat": "Stable P95",
+                "refId": "A"
+              },
+              {
+                "expr": "histogram_quantile(0.95, sum(rate(istio_request_duration_milliseconds_bucket{destination_service_name=\"podinfo-canary\"}[1m])) by (le))",
+                "legendFormat": "Canary P95",
+                "refId": "B"
+              }
+            ]
+          },
+          {
+            "title": "Traffic Split %",
+            "type": "piechart",
+            "targets": [
+              {
+                "expr": "sum(rate(istio_requests_total{destination_service_name=~\"podinfo.*\"}[5m])) by (destination_service_name)",
+                "legendFormat": "{{destination_service_name}}",
+                "refId": "A"
+              }
+            ]
+          },
+          {
+            "title": "Circuit Breaker Status",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "sum(envoy_cluster_upstream_rq_pending_overflow{cluster_name=~\".*podinfo.*\"})",
+                "legendFormat": "Overflow Count",
+                "refId": "A"
+              }
+            ]
+          },
+          {
+            "title": "Connection Pool",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "sum(envoy_cluster_upstream_cx_active{cluster_name=~\".*podinfo.*\"}) by (cluster_name)",
+                "legendFormat": "{{cluster_name}}",
+                "refId": "A"
+              }
+            ]
+          }
+        ]
+      }
+    }
+
+---
+# Kiali Configuration for Service Mesh Visualization
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kiali-config
+  namespace: istio-system
+data:
+  config.yaml: |
+    server:
+      port: 20001
+      web_root: /kiali
+
+    auth:
+      strategy: anonymous
+
+    deployment:
+      accessible_namespaces:
+      - '**'
+
+    external_services:
+      custom_dashboards:
+        enabled: true
+      prometheus:
+        url: http://prometheus.monitoring.svc.cluster.local:9090
+      tracing:
+        enabled: true
+        in_cluster_url: http://jaeger-query.observability.svc.cluster.local:16686
+        url: https://jaeger.example.com
+        use_grpc: true
+      grafana:
+        enabled: true
+        in_cluster_url: http://grafana.monitoring.svc.cluster.local:3000
+        url: https://grafana.example.com
+
+    istio_labels:
+      app_label_name: app
+      version_label_name: version
+
+---
+# Kiali Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kiali
+  namespace: istio-system
+  labels:
+    app: kiali
+    version: v1.75
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kiali
+  template:
+    metadata:
+      labels:
+        app: kiali
+        version: v1.75
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      serviceAccountName: kiali
+      containers:
+      - name: kiali
+        image: quay.io/kiali/kiali:v1.75
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 20001
+          name: api-port
+        - containerPort: 9090
+          name: metrics-port
+        env:
+        - name: ACTIVE_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        volumeMounts:
+        - name: kiali-config
+          mountPath: /kiali-configuration
+        - name: kiali-secret
+          mountPath: /kiali-secret
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        livenessProbe:
+          httpGet:
+            path: /kiali/healthz
+            port: 20001
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /kiali/healthz
+            port: 20001
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 30
+      volumes:
+      - name: kiali-config
+        configMap:
+          name: kiali-config
+      - name: kiali-secret
+        secret:
+          secretName: kiali-secret
+          optional: true
+
+---
+# Kiali Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: kiali
+  namespace: istio-system
+  labels:
+    app: kiali
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 20001
+    targetPort: 20001
+  - name: metrics
+    port: 9090
+    targetPort: 9090
+  selector:
+    app: kiali
+
+---
+# Kiali ServiceAccount and RBAC
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kiali
+  namespace: istio-system
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kiali
+rules:
+- apiGroups: [""]
+  resources:
+  - configmaps
+  - endpoints
+  - pods
+  - services
+  - replicationcontrollers
+  - namespaces
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups: ["apps"]
+  resources:
+  - deployments
+  - replicasets
+  - statefulsets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups: ["networking.istio.io"]
+  resources:
+  - destinationrules
+  - gateways
+  - serviceentries
+  - virtualservices
+  - workloadentries
+  - workloadgroups
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - delete
+  - patch
+- apiGroups: ["security.istio.io"]
+  resources:
+  - authorizationpolicies
+  - peerauthentications
+  - requestauthentications
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - delete
+  - patch
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kiali
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kiali
+subjects:
+- kind: ServiceAccount
+  name: kiali
+  namespace: istio-system

@@ -1,0 +1,188 @@
+# Comprehensive Kubernetes Audit Policy
+# This policy defines what events are logged and at what level
+
+apiVersion: audit.k8s.io/v1
+kind: Policy
+# Don't generate audit events for all requests in RequestReceived stage
+omitStages:
+  - "RequestReceived"
+
+rules:
+  # Log nothing from the following users (high-volume, low-value)
+  - level: None
+    users: ["system:kube-proxy"]
+    verbs: ["watch"]
+    resources:
+      - group: ""
+        resources: ["endpoints", "services", "services/status"]
+
+  - level: None
+    users: ["system:unsecured"]
+    namespaces: ["kube-system"]
+
+  - level: None
+    users:
+      - "system:kube-controller-manager"
+      - "system:kube-scheduler"
+      - "system:serviceaccount:kube-system:endpoint-controller"
+    verbs: ["get", "update"]
+    namespaces: ["kube-system"]
+    resources:
+      - group: ""
+        resources: ["endpoints"]
+
+  - level: None
+    users: ["system:apiserver"]
+    verbs: ["get"]
+    resources:
+      - group: ""
+        resources: ["namespaces", "namespaces/status", "namespaces/finalize"]
+
+  # Don't log HPA fetching metrics
+  - level: None
+    users:
+      - "system:kube-controller-manager"
+    verbs: ["get", "list"]
+    resources:
+      - group: "metrics.k8s.io"
+
+  # Don't log these read-only URL paths
+  - level: None
+    nonResourceURLs:
+      - "/healthz*"
+      - "/version"
+      - "/swagger*"
+      - "/openapi*"
+
+  # Log all requests to read secrets at Metadata level
+  - level: Metadata
+    resources:
+      - group: ""
+        resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+
+  # Log secret, configmap, and tokenreview changes at RequestResponse level
+  - level: RequestResponse
+    resources:
+      - group: ""
+        resources: ["secrets", "configmaps"]
+      - group: authentication.k8s.io
+        resources: ["tokenreviews"]
+    verbs: ["create", "update", "patch", "delete", "deletecollection"]
+    omitStages:
+      - "RequestReceived"
+
+  # Log all authentication and authorization decisions at Request level
+  - level: Request
+    verbs: ["create", "update", "patch", "delete", "deletecollection"]
+    resources:
+      - group: "rbac.authorization.k8s.io"
+      - group: "authorization.k8s.io"
+
+  # Log RBAC role and rolebinding changes at RequestResponse level
+  - level: RequestResponse
+    resources:
+      - group: "rbac.authorization.k8s.io"
+        resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
+    verbs: ["create", "update", "patch", "delete"]
+
+  # Log pod exec/attach/portforward at Request level
+  - level: Request
+    resources:
+      - group: ""
+        resources: ["pods/exec", "pods/attach", "pods/portforward"]
+    verbs: ["create"]
+
+  # Log pod creation/deletion at RequestResponse level
+  - level: RequestResponse
+    resources:
+      - group: ""
+        resources: ["pods"]
+    verbs: ["create", "delete"]
+
+  # Log changes to critical namespaces at RequestResponse level
+  - level: RequestResponse
+    namespaces: ["kube-system", "kube-public", "kube-node-lease", "production"]
+    verbs: ["create", "update", "patch", "delete", "deletecollection"]
+
+  # Log admission webhook decisions
+  - level: Request
+    resources:
+      - group: "admissionregistration.k8s.io"
+        resources: ["validatingwebhookconfigurations", "mutatingwebhookconfigurations"]
+
+  # Log all service account changes
+  - level: RequestResponse
+    resources:
+      - group: ""
+        resources: ["serviceaccounts"]
+    verbs: ["create", "update", "patch", "delete"]
+
+  # Log persistent volume and storage changes
+  - level: Request
+    resources:
+      - group: ""
+        resources: ["persistentvolumes", "persistentvolumeclaims"]
+      - group: "storage.k8s.io"
+    verbs: ["create", "update", "patch", "delete"]
+
+  # Log network policy changes
+  - level: RequestResponse
+    resources:
+      - group: "networking.k8s.io"
+        resources: ["networkpolicies"]
+    verbs: ["create", "update", "patch", "delete"]
+
+  # Log security context changes in pod security policies
+  - level: RequestResponse
+    resources:
+      - group: "policy"
+        resources: ["podsecuritypolicies"]
+    verbs: ["create", "update", "patch", "delete"]
+
+  # Log custom resource definition changes
+  - level: RequestResponse
+    resources:
+      - group: "apiextensions.k8s.io"
+        resources: ["customresourcedefinitions"]
+    verbs: ["create", "update", "patch", "delete"]
+
+  # Log workload changes (deployments, statefulsets, daemonsets) at Request level
+  - level: Request
+    resources:
+      - group: "apps"
+        resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+      - group: "batch"
+        resources: ["jobs", "cronjobs"]
+    verbs: ["create", "update", "patch", "delete"]
+
+  # Log ingress changes
+  - level: Request
+    resources:
+      - group: "networking.k8s.io"
+        resources: ["ingresses"]
+    verbs: ["create", "update", "patch", "delete"]
+
+  # Log node changes (drain, cordon, label)
+  - level: Request
+    resources:
+      - group: ""
+        resources: ["nodes"]
+    verbs: ["update", "patch", "delete"]
+
+  # Log certificate signing request approval
+  - level: RequestResponse
+    resources:
+      - group: "certificates.k8s.io"
+        resources: ["certificatesigningrequests/approval"]
+    verbs: ["update"]
+
+  # Log failed requests at Metadata level (security relevant)
+  - level: Metadata
+    omitStages:
+      - "RequestReceived"
+
+  # Default rule - log everything else at Metadata level
+  - level: Metadata
+    omitStages:
+      - "RequestReceived"

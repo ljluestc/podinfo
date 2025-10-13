@@ -1,0 +1,512 @@
+---
+# Comprehensive Alert Rules for Kubernetes Cluster
+# Covers infrastructure, security, application, and SLO-based alerts
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: comprehensive-alert-rules
+  namespace: monitoring
+  labels:
+    prometheus: kube-prometheus
+spec:
+  groups:
+  # ===================================
+  # Infrastructure Health Alerts
+  # ===================================
+  - name: infrastructure.health
+    interval: 30s
+    rules:
+    # Node health
+    - alert: NodeNotReady
+      expr: kube_node_status_condition{condition="Ready",status="true"} == 0
+      for: 5m
+      labels:
+        severity: critical
+        category: infrastructure
+        component: node
+      annotations:
+        summary: "Node {{ $labels.node }} is not ready"
+        description: "Node {{ $labels.node }} has been in NotReady state for more than 5 minutes"
+        runbook_url: "https://runbooks.example.com/node-not-ready"
+
+    - alert: NodeMemoryPressure
+      expr: kube_node_status_condition{condition="MemoryPressure",status="true"} == 1
+      for: 5m
+      labels:
+        severity: warning
+        category: infrastructure
+        component: node
+      annotations:
+        summary: "Node {{ $labels.node }} has memory pressure"
+        description: "Node {{ $labels.node }} is experiencing memory pressure"
+        runbook_url: "https://runbooks.example.com/node-memory-pressure"
+
+    - alert: NodeDiskPressure
+      expr: kube_node_status_condition{condition="DiskPressure",status="true"} == 1
+      for: 5m
+      labels:
+        severity: warning
+        category: infrastructure
+        component: node
+      annotations:
+        summary: "Node {{ $labels.node }} has disk pressure"
+        description: "Node {{ $labels.node }} is experiencing disk pressure"
+        runbook_url: "https://runbooks.example.com/node-disk-pressure"
+
+    - alert: NodeHighCPU
+      expr: (1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) by (instance)) * 100 > 80
+      for: 10m
+      labels:
+        severity: warning
+        category: infrastructure
+        component: node
+      annotations:
+        summary: "High CPU usage on node {{ $labels.instance }}"
+        description: "Node {{ $labels.instance }} has CPU usage above 80% for 10 minutes"
+        current_value: "{{ $value | humanizePercentage }}"
+        runbook_url: "https://runbooks.example.com/node-high-cpu"
+
+    - alert: NodeHighMemory
+      expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 85
+      for: 10m
+      labels:
+        severity: warning
+        category: infrastructure
+        component: node
+      annotations:
+        summary: "High memory usage on node {{ $labels.instance }}"
+        description: "Node {{ $labels.instance }} has memory usage above 85% for 10 minutes"
+        current_value: "{{ $value | humanizePercentage }}"
+        runbook_url: "https://runbooks.example.com/node-high-memory"
+
+    - alert: NodeDiskSpaceLow
+      expr: (1 - (node_filesystem_avail_bytes{fstype!~"tmpfs|fuse.lxcfs"} / node_filesystem_size_bytes{fstype!~"tmpfs|fuse.lxcfs"})) * 100 > 85
+      for: 10m
+      labels:
+        severity: warning
+        category: infrastructure
+        component: storage
+      annotations:
+        summary: "Low disk space on {{ $labels.instance }}:{{ $labels.mountpoint }}"
+        description: "Filesystem {{ $labels.mountpoint }} on {{ $labels.instance }} has less than 15% space available"
+        current_value: "{{ $value | humanizePercentage }}"
+        runbook_url: "https://runbooks.example.com/node-disk-space-low"
+
+    - alert: NodeDiskSpaceCritical
+      expr: (1 - (node_filesystem_avail_bytes{fstype!~"tmpfs|fuse.lxcfs"} / node_filesystem_size_bytes{fstype!~"tmpfs|fuse.lxcfs"})) * 100 > 95
+      for: 5m
+      labels:
+        severity: critical
+        category: infrastructure
+        component: storage
+      annotations:
+        summary: "Critical disk space on {{ $labels.instance }}:{{ $labels.mountpoint }}"
+        description: "Filesystem {{ $labels.mountpoint }} on {{ $labels.instance }} has less than 5% space available"
+        current_value: "{{ $value | humanizePercentage }}"
+        runbook_url: "https://runbooks.example.com/node-disk-space-critical"
+
+  # ===================================
+  # Kubernetes Component Health
+  # ===================================
+  - name: kubernetes.components
+    interval: 30s
+    rules:
+    - alert: KubeAPIServerDown
+      expr: up{job="apiserver"} == 0
+      for: 5m
+      labels:
+        severity: critical
+        category: infrastructure
+        component: apiserver
+      annotations:
+        summary: "Kubernetes API Server is down"
+        description: "API Server has been down for more than 5 minutes"
+        runbook_url: "https://runbooks.example.com/apiserver-down"
+
+    - alert: KubeAPIServerHighLatency
+      expr: histogram_quantile(0.99, sum(rate(apiserver_request_duration_seconds_bucket{verb!~"WATCH|CONNECT"}[5m])) by (verb, le)) > 1
+      for: 10m
+      labels:
+        severity: warning
+        category: infrastructure
+        component: apiserver
+      annotations:
+        summary: "High API Server latency"
+        description: "API Server 99th percentile latency for {{ $labels.verb }} requests is {{ $value }}s"
+        runbook_url: "https://runbooks.example.com/apiserver-high-latency"
+
+    - alert: KubeControllerManagerDown
+      expr: up{job="kube-controller-manager"} == 0
+      for: 5m
+      labels:
+        severity: critical
+        category: infrastructure
+        component: controller-manager
+      annotations:
+        summary: "Kube Controller Manager is down"
+        description: "Controller Manager has been down for more than 5 minutes"
+        runbook_url: "https://runbooks.example.com/controller-manager-down"
+
+    - alert: KubeSchedulerDown
+      expr: up{job="kube-scheduler"} == 0
+      for: 5m
+      labels:
+        severity: critical
+        category: infrastructure
+        component: scheduler
+      annotations:
+        summary: "Kube Scheduler is down"
+        description: "Scheduler has been down for more than 5 minutes"
+        runbook_url: "https://runbooks.example.com/scheduler-down"
+
+    - alert: EtcdClusterDown
+      expr: up{job="etcd"} == 0
+      for: 3m
+      labels:
+        severity: critical
+        category: infrastructure
+        component: etcd
+      annotations:
+        summary: "etcd cluster member is down"
+        description: "etcd cluster member {{ $labels.instance }} has been down for more than 3 minutes"
+        runbook_url: "https://runbooks.example.com/etcd-down"
+
+    - alert: EtcdHighLatency
+      expr: histogram_quantile(0.99, rate(etcd_disk_wal_fsync_duration_seconds_bucket[5m])) > 0.5
+      for: 10m
+      labels:
+        severity: warning
+        category: infrastructure
+        component: etcd
+      annotations:
+        summary: "etcd high fsync latency"
+        description: "etcd 99th percentile fsync latency is {{ $value }}s"
+        runbook_url: "https://runbooks.example.com/etcd-high-latency"
+
+  # ===================================
+  # Pod and Container Alerts
+  # ===================================
+  - name: kubernetes.pods
+    interval: 30s
+    rules:
+    - alert: PodCrashLooping
+      expr: rate(kube_pod_container_status_restarts_total[15m]) > 0
+      for: 5m
+      labels:
+        severity: warning
+        category: application
+        component: pod
+      annotations:
+        summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} is crash looping"
+        description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has restarted {{ $value }} times in the last 15 minutes"
+        runbook_url: "https://runbooks.example.com/pod-crash-looping"
+
+    - alert: PodNotReady
+      expr: sum by (namespace, pod) (kube_pod_status_phase{phase=~"Pending|Unknown|Failed"}) > 0
+      for: 15m
+      labels:
+        severity: warning
+        category: application
+        component: pod
+      annotations:
+        summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} not ready"
+        description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has been in {{ $labels.phase }} state for more than 15 minutes"
+        runbook_url: "https://runbooks.example.com/pod-not-ready"
+
+    - alert: PodHighCPU
+      expr: sum(rate(container_cpu_usage_seconds_total{container!="",container!="POD"}[5m])) by (namespace, pod, container) > 0.8
+      for: 10m
+      labels:
+        severity: warning
+        category: application
+        component: pod
+      annotations:
+        summary: "High CPU usage in pod {{ $labels.namespace }}/{{ $labels.pod }}"
+        description: "Container {{ $labels.container }} in pod {{ $labels.pod }} is using {{ $value | humanize }} CPU cores"
+        runbook_url: "https://runbooks.example.com/pod-high-cpu"
+
+    - alert: PodHighMemory
+      expr: sum(container_memory_working_set_bytes{container!="",container!="POD"}) by (namespace, pod, container) / sum(container_spec_memory_limit_bytes{container!="",container!="POD"}) by (namespace, pod, container) > 0.9
+      for: 10m
+      labels:
+        severity: warning
+        category: application
+        component: pod
+      annotations:
+        summary: "High memory usage in pod {{ $labels.namespace }}/{{ $labels.pod }}"
+        description: "Container {{ $labels.container }} in pod {{ $labels.pod }} is using {{ $value | humanizePercentage }} of its memory limit"
+        runbook_url: "https://runbooks.example.com/pod-high-memory"
+
+    - alert: ContainerOOMKilled
+      expr: sum by (namespace, pod, container) (kube_pod_container_status_last_terminated_reason{reason="OOMKilled"}) > 0
+      for: 0m
+      labels:
+        severity: warning
+        category: application
+        component: pod
+      annotations:
+        summary: "Container OOMKilled in {{ $labels.namespace }}/{{ $labels.pod }}"
+        description: "Container {{ $labels.container }} in pod {{ $labels.pod }} was OOMKilled"
+        runbook_url: "https://runbooks.example.com/container-oom-killed"
+
+  # ===================================
+  # Security Alerts
+  # ===================================
+  - name: security.alerts
+    interval: 30s
+    rules:
+    - alert: UnauthorizedAPIAccess
+      expr: sum(rate(apiserver_audit_event_total{verb!~"get|list|watch"}[5m])) by (user, verb, objectRef_resource) > 10
+      for: 5m
+      labels:
+        severity: warning
+        category: security
+        component: audit
+      annotations:
+        summary: "High rate of API modifications by {{ $labels.user }}"
+        description: "User {{ $labels.user }} is performing {{ $labels.verb }} on {{ $labels.objectRef_resource }} at {{ $value }} req/s"
+        runbook_url: "https://runbooks.example.com/unauthorized-api-access"
+
+    - alert: PodSecurityPolicyViolation
+      expr: sum(rate(apiserver_admission_webhook_rejection_count[5m])) by (name, operation) > 0
+      for: 5m
+      labels:
+        severity: warning
+        category: security
+        component: admission
+      annotations:
+        summary: "Admission webhook {{ $labels.name }} rejecting requests"
+        description: "Admission webhook {{ $labels.name }} is rejecting {{ $labels.operation }} operations at {{ $value }} req/s"
+        runbook_url: "https://runbooks.example.com/psp-violation"
+
+    - alert: PrivilegedContainerRunning
+      expr: sum(kube_pod_container_status_running) by (namespace, pod) * on(namespace, pod) group_left() kube_pod_spec_containers_privileged == 1
+      for: 10m
+      labels:
+        severity: warning
+        category: security
+        component: pod
+      annotations:
+        summary: "Privileged container running in {{ $labels.namespace }}/{{ $labels.pod }}"
+        description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} is running a privileged container"
+        runbook_url: "https://runbooks.example.com/privileged-container"
+
+    - alert: CertificateExpiringSoon
+      expr: (apiserver_client_certificate_expiration_seconds < 7*24*3600) and (apiserver_client_certificate_expiration_seconds > 0)
+      for: 1h
+      labels:
+        severity: warning
+        category: security
+        component: certificates
+      annotations:
+        summary: "Certificate expiring soon"
+        description: "Certificate will expire in {{ $value | humanizeDuration }}"
+        runbook_url: "https://runbooks.example.com/certificate-expiring"
+
+    - alert: CertificateExpired
+      expr: apiserver_client_certificate_expiration_seconds < 0
+      for: 0m
+      labels:
+        severity: critical
+        category: security
+        component: certificates
+      annotations:
+        summary: "Certificate has expired"
+        description: "A certificate has expired"
+        runbook_url: "https://runbooks.example.com/certificate-expired"
+
+    - alert: FalcoSecurityAlert
+      expr: increase(falco_events_total{priority=~"Critical|Error"}[5m]) > 0
+      for: 1m
+      labels:
+        severity: critical
+        category: security
+        component: runtime
+      annotations:
+        summary: "Falco detected security event"
+        description: "Falco detected {{ $value }} {{ $labels.priority }} security events: {{ $labels.rule }}"
+        runbook_url: "https://runbooks.example.com/falco-alert"
+
+  # ===================================
+  # Network Alerts
+  # ===================================
+  - name: network.alerts
+    interval: 30s
+    rules:
+    - alert: HighNetworkErrorRate
+      expr: rate(node_network_receive_errs_total[5m]) + rate(node_network_transmit_errs_total[5m]) > 10
+      for: 5m
+      labels:
+        severity: warning
+        category: infrastructure
+        component: network
+      annotations:
+        summary: "High network error rate on {{ $labels.instance }}"
+        description: "Node {{ $labels.instance }} interface {{ $labels.device }} has {{ $value }} errors/s"
+        runbook_url: "https://runbooks.example.com/network-errors"
+
+    - alert: NetworkPolicyViolation
+      expr: sum(rate(cilium_drop_count_total[5m])) by (reason) > 1
+      for: 5m
+      labels:
+        severity: warning
+        category: security
+        component: network
+      annotations:
+        summary: "Network policy drops detected"
+        description: "Network policy is dropping packets due to {{ $labels.reason }} at {{ $value }} pkt/s"
+        runbook_url: "https://runbooks.example.com/network-policy-violation"
+
+  # ===================================
+  # Storage Alerts
+  # ===================================
+  - name: storage.alerts
+    interval: 30s
+    rules:
+    - alert: PersistentVolumeClaimPending
+      expr: kube_persistentvolumeclaim_status_phase{phase="Pending"} == 1
+      for: 10m
+      labels:
+        severity: warning
+        category: infrastructure
+        component: storage
+      annotations:
+        summary: "PVC {{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }} is pending"
+        description: "PVC {{ $labels.persistentvolumeclaim }} in namespace {{ $labels.namespace }} has been pending for more than 10 minutes"
+        runbook_url: "https://runbooks.example.com/pvc-pending"
+
+    - alert: PersistentVolumeLowSpace
+      expr: (kubelet_volume_stats_available_bytes / kubelet_volume_stats_capacity_bytes) < 0.15
+      for: 10m
+      labels:
+        severity: warning
+        category: infrastructure
+        component: storage
+      annotations:
+        summary: "PV {{ $labels.persistentvolumeclaim }} low on space"
+        description: "PV {{ $labels.persistentvolumeclaim }} in namespace {{ $labels.namespace }} has less than 15% space available"
+        runbook_url: "https://runbooks.example.com/pv-low-space"
+
+    - alert: PersistentVolumeInodeLow
+      expr: (kubelet_volume_stats_inodes_free / kubelet_volume_stats_inodes) < 0.15
+      for: 10m
+      labels:
+        severity: warning
+        category: infrastructure
+        component: storage
+      annotations:
+        summary: "PV {{ $labels.persistentvolumeclaim }} low on inodes"
+        description: "PV {{ $labels.persistentvolumeclaim }} has less than 15% inodes available"
+        runbook_url: "https://runbooks.example.com/pv-inode-low"
+
+  # ===================================
+  # SLO-Based Alerts
+  # ===================================
+  - name: slo.alerts
+    interval: 1m
+    rules:
+    # API Server Availability SLO (99.9%)
+    - alert: APIServerSLOBreach
+      expr: |
+        (
+          sum(rate(apiserver_request_total{code=~"5.."}[5m]))
+          /
+          sum(rate(apiserver_request_total[5m]))
+        ) > 0.001
+      for: 5m
+      labels:
+        severity: critical
+        category: infrastructure
+        type: slo
+        service: apiserver
+        slo: availability
+      annotations:
+        summary: "API Server availability SLO breach"
+        description: "API Server error rate is {{ $value | humanizePercentage }}, exceeding 0.1% threshold"
+        threshold: "0.1%"
+        current_value: "{{ $value | humanizePercentage }}"
+        error_budget: "Calculating..."
+        runbook_url: "https://runbooks.example.com/apiserver-slo"
+
+    # Application Latency SLO (95% < 500ms)
+    - alert: ApplicationLatencySLOBreach
+      expr: |
+        histogram_quantile(0.95,
+          sum(rate(http_request_duration_seconds_bucket{job="myapp"}[5m])) by (le)
+        ) > 0.5
+      for: 10m
+      labels:
+        severity: warning
+        category: application
+        type: slo
+        service: myapp
+        slo: latency
+      annotations:
+        summary: "Application latency SLO breach"
+        description: "95th percentile latency is {{ $value }}s, exceeding 500ms threshold"
+        threshold: "500ms"
+        current_value: "{{ $value | humanize }}s"
+        runbook_url: "https://runbooks.example.com/app-latency-slo"
+
+    # Error Budget Burn Rate
+    - alert: HighErrorBudgetBurnRate
+      expr: |
+        (
+          sum(rate(http_requests_total{status=~"5.."}[1h]))
+          /
+          sum(rate(http_requests_total[1h]))
+        ) > 0.001
+      for: 5m
+      labels:
+        severity: warning
+        category: application
+        type: slo
+        slo: error-budget
+      annotations:
+        summary: "High error budget burn rate"
+        description: "Error budget is being consumed at {{ $value | humanizePercentage }}/hour"
+        runbook_url: "https://runbooks.example.com/error-budget-burn"
+
+  # ===================================
+  # Backup and DR Alerts
+  # ===================================
+  - name: backup.alerts
+    interval: 1h
+    rules:
+    - alert: BackupFailed
+      expr: time() - velero_backup_last_successful_timestamp > 86400
+      for: 1h
+      labels:
+        severity: warning
+        category: infrastructure
+        component: backup
+      annotations:
+        summary: "Backup has not completed successfully"
+        description: "No successful backup in the last 24 hours for {{ $labels.schedule }}"
+        runbook_url: "https://runbooks.example.com/backup-failed"
+
+    - alert: BackupOld
+      expr: time() - velero_backup_last_successful_timestamp > 7*86400
+      for: 1h
+      labels:
+        severity: critical
+        category: infrastructure
+        component: backup
+      annotations:
+        summary: "Backup is very old"
+        description: "No successful backup in the last 7 days for {{ $labels.schedule }}"
+        runbook_url: "https://runbooks.example.com/backup-old"
+
+  # ===================================
+  # Dead Man's Switch
+  # ===================================
+  - name: watchdog
+    interval: 30s
+    rules:
+    - alert: Watchdog
+      expr: vector(1)
+      labels:
+        severity: none
+      annotations:
+        summary: "Alerting pipeline is functional"
+        description: "This is a dead man's switch to ensure alerting pipeline is working"

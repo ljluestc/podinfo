@@ -1,0 +1,178 @@
+# Namespace-specific Roles with Least Privilege
+
+---
+# Role: Application Developer (namespace-scoped)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: app-developer
+  namespace: default  # Replicate in each namespace
+rules:
+# Manage deployments
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# Manage services and configs
+- apiGroups: [""]
+  resources: ["services", "configmaps"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# View pods and logs
+- apiGroups: [""]
+  resources: ["pods", "pods/log"]
+  verbs: ["get", "list", "watch"]
+# Execute into pods for debugging
+- apiGroups: [""]
+  resources: ["pods/exec"]
+  verbs: ["create"]
+# Limited secret access (view only)
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list"]
+
+---
+# Role: Application Operator (namespace-scoped)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: app-operator
+  namespace: default
+rules:
+# Scale workloads
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets", "statefulsets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps"]
+  resources: ["deployments/scale", "statefulsets/scale"]
+  verbs: ["get", "update"]
+# Restart pods
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch", "delete"]
+# View logs
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get", "list"]
+# View configs (no modify)
+- apiGroups: [""]
+  resources: ["configmaps", "services"]
+  verbs: ["get", "list", "watch"]
+
+---
+# Role: Read-only User (namespace-scoped)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: readonly-user
+  namespace: default
+rules:
+# View workloads
+- apiGroups: ["apps", "batch"]
+  resources: ["*"]
+  verbs: ["get", "list", "watch"]
+# View core resources
+- apiGroups: [""]
+  resources: ["pods", "pods/log", "services", "configmaps", "events"]
+  verbs: ["get", "list", "watch"]
+# View networking
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses", "networkpolicies"]
+  verbs: ["get", "list", "watch"]
+# No access to secrets
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: []
+
+---
+# Role: Service Account Manager (namespace-scoped)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sa-manager
+  namespace: default
+rules:
+# Manage service accounts
+- apiGroups: [""]
+  resources: ["serviceaccounts"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# View associated secrets
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list"]
+# Manage role bindings in namespace
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources: ["rolebindings"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# View roles
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources: ["roles"]
+  verbs: ["get", "list", "watch"]
+
+---
+# Role: Debug Access (temporary troubleshooting)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: debug-access
+  namespace: default
+rules:
+# Full pod access for debugging
+- apiGroups: [""]
+  resources: ["pods", "pods/log", "pods/exec", "pods/portforward"]
+  verbs: ["*"]
+# View workloads
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets", "statefulsets"]
+  verbs: ["get", "list", "watch"]
+# View configs
+- apiGroups: [""]
+  resources: ["configmaps", "services", "events"]
+  verbs: ["get", "list", "watch"]
+# Create debug pods
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["create", "delete"]
+
+---
+# Role: Secret Reader (for specific service accounts)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: secret-reader
+  namespace: default
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "watch"]
+
+---
+# Role: ConfigMap Manager
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: configmap-manager
+  namespace: default
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+---
+# Role: Job Runner (for CI/CD)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: job-runner
+  namespace: default
+rules:
+# Manage jobs
+- apiGroups: ["batch"]
+  resources: ["jobs", "cronjobs"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# View pods created by jobs
+- apiGroups: [""]
+  resources: ["pods", "pods/log"]
+  verbs: ["get", "list", "watch"]
+# Access configs needed by jobs
+- apiGroups: [""]
+  resources: ["configmaps", "secrets"]
+  verbs: ["get", "list"]

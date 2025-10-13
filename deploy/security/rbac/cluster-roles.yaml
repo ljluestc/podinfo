@@ -1,0 +1,256 @@
+# Comprehensive RBAC Configuration with Least Privilege
+# Custom ClusterRoles for different personas
+
+---
+# ClusterRole: Cluster Admin (Full Access)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cluster-admin-custom
+  labels:
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"
+rules:
+- apiGroups: ["*"]
+  resources: ["*"]
+  verbs: ["*"]
+- nonResourceURLs: ["*"]
+  verbs: ["*"]
+
+---
+# ClusterRole: Platform Admin (Cluster-wide management except security)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: platform-admin
+rules:
+# Full access to workloads
+- apiGroups: ["apps", "batch", "extensions"]
+  resources: ["*"]
+  verbs: ["*"]
+# Full access to core resources except secrets
+- apiGroups: [""]
+  resources: ["pods", "services", "configmaps", "persistentvolumeclaims", "persistentvolumes", "endpoints"]
+  verbs: ["*"]
+# Read access to secrets (no create/update/delete)
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "watch"]
+# Full access to networking
+- apiGroups: ["networking.k8s.io"]
+  resources: ["*"]
+  verbs: ["*"]
+# Full access to storage
+- apiGroups: ["storage.k8s.io"]
+  resources: ["*"]
+  verbs: ["*"]
+# Read access to RBAC
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources: ["*"]
+  verbs: ["get", "list", "watch"]
+
+---
+# ClusterRole: Developer (Namespace-scoped deployment)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: developer
+rules:
+# Workload management
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# Batch jobs
+- apiGroups: ["batch"]
+  resources: ["jobs", "cronjobs"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# Core resources
+- apiGroups: [""]
+  resources: ["pods", "pods/log", "pods/status"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["pods/exec", "pods/portforward"]
+  verbs: ["create"]
+- apiGroups: [""]
+  resources: ["services", "configmaps"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# Limited secret access (only in designated namespaces)
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list"]
+# Ingress management
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# HPA management
+- apiGroups: ["autoscaling"]
+  resources: ["horizontalpodautoscalers"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+---
+# ClusterRole: Developer ReadOnly
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: developer-readonly
+rules:
+# Read-only workload access
+- apiGroups: ["apps", "batch", "extensions"]
+  resources: ["*"]
+  verbs: ["get", "list", "watch"]
+# Read-only core resources
+- apiGroups: [""]
+  resources: ["pods", "pods/log", "services", "configmaps", "persistentvolumeclaims"]
+  verbs: ["get", "list", "watch"]
+# Read-only networking
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses", "networkpolicies"]
+  verbs: ["get", "list", "watch"]
+
+---
+# ClusterRole: Operator (Specific operational tasks)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: operator
+rules:
+# Pod operations
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch", "delete"]
+- apiGroups: [""]
+  resources: ["pods/log", "pods/status"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["pods/exec"]
+  verbs: ["create"]
+# Deployment scaling
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets", "statefulsets"]
+  verbs: ["get", "list", "watch", "patch"]
+- apiGroups: ["apps"]
+  resources: ["deployments/scale", "replicasets/scale", "statefulsets/scale"]
+  verbs: ["get", "update"]
+# Node management (drain, cordon)
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+# Events
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["get", "list", "watch"]
+
+---
+# ClusterRole: Viewer (Read-only across cluster)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: viewer
+rules:
+# Read all resources except secrets
+- apiGroups: ["*"]
+  resources: ["*"]
+  verbs: ["get", "list", "watch"]
+# Explicitly deny secrets
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: []
+
+---
+# ClusterRole: Security Auditor
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: security-auditor
+rules:
+# Read all RBAC configurations
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources: ["*"]
+  verbs: ["get", "list", "watch"]
+# Read pod security policies
+- apiGroups: ["policy"]
+  resources: ["podsecuritypolicies"]
+  verbs: ["get", "list", "watch"]
+# Read network policies
+- apiGroups: ["networking.k8s.io"]
+  resources: ["networkpolicies"]
+  verbs: ["get", "list", "watch"]
+# Read secrets metadata (not content)
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["list"]
+# Read audit logs (if using webhook)
+- apiGroups: ["audit.k8s.io"]
+  resources: ["events"]
+  verbs: ["get", "list", "watch"]
+
+---
+# ClusterRole: Monitoring (for Prometheus, Grafana)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: monitoring
+rules:
+# Read metrics
+- apiGroups: [""]
+  resources: ["nodes", "nodes/metrics", "nodes/stats", "nodes/proxy", "services", "endpoints", "pods"]
+  verbs: ["get", "list", "watch"]
+- nonResourceURLs: ["/metrics", "/metrics/cadvisor"]
+  verbs: ["get"]
+
+---
+# ClusterRole: CI/CD Pipeline
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cicd-deployer
+rules:
+# Deploy applications
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets", "statefulsets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
+- apiGroups: [""]
+  resources: ["services", "configmaps"]
+  verbs: ["get", "list", "watch", "create", "update", "patch"]
+# Read secrets for deployment (external secrets operator handles creation)
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list"]
+# Manage jobs for migrations
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["get", "list", "watch", "create", "delete"]
+# Check rollout status
+- apiGroups: ["apps"]
+  resources: ["deployments/status", "replicasets/status"]
+  verbs: ["get"]
+
+---
+# ClusterRole: Namespace Admin (full access within namespace)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: namespace-admin
+rules:
+# Full access to namespace-scoped resources
+- apiGroups: ["*"]
+  resources: ["*"]
+  verbs: ["*"]
+# Cannot modify namespace itself or cluster-scoped resources
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["get", "list"]
+
+---
+# ClusterRole: Emergency Break-Glass (time-limited full access)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: emergency-admin
+  annotations:
+    description: "Emergency break-glass access - requires approval and is time-limited"
+rules:
+- apiGroups: ["*"]
+  resources: ["*"]
+  verbs: ["*"]
+- nonResourceURLs: ["*"]
+  verbs: ["*"]

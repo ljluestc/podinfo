@@ -1,0 +1,267 @@
+# Audit Backend Configuration
+# Configures where and how audit logs are stored
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: audit-backend-config
+  namespace: kube-system
+data:
+  apiserver-audit-flags.conf: |
+    # Audit Log Backend Configuration for kube-apiserver
+    # Add these flags to kube-apiserver configuration
+
+    # Audit policy file location
+    --audit-policy-file=/etc/kubernetes/audit/audit-policy.yaml
+
+    # Log backend (file-based)
+    --audit-log-path=/var/log/kubernetes/audit/audit.log
+    --audit-log-maxage=30       # Keep logs for 30 days
+    --audit-log-maxbackup=10    # Keep 10 backup files
+    --audit-log-maxsize=100     # 100MB per file
+    --audit-log-format=json     # JSON format for parsing
+
+    # Optional: Dynamic audit configuration
+    --audit-dynamic-configuration=true
+
+    # Optional: Webhook backend for real-time log shipping
+    # --audit-webhook-config-file=/etc/kubernetes/audit/audit-webhook-config.yaml
+    # --audit-webhook-initial-backoff=10s
+    # --audit-webhook-batch-max-size=400
+    # --audit-webhook-batch-max-wait=30s
+
+  setup-instructions.md: |
+    # Audit Logging Setup Instructions
+
+    ## For kubeadm-based clusters:
+
+    1. Create audit policy directory:
+       ```bash
+       sudo mkdir -p /etc/kubernetes/audit
+       sudo mkdir -p /var/log/kubernetes/audit
+       ```
+
+    2. Copy audit policy file:
+       ```bash
+       kubectl get configmap audit-policy -n kube-system -o jsonpath='{.data.audit-policy\.yaml}' | \
+         sudo tee /etc/kubernetes/audit/audit-policy.yaml
+       ```
+
+    3. Edit /etc/kubernetes/manifests/kube-apiserver.yaml:
+       - Add audit flags to command section
+       - Add volume mounts for audit policy and log directory
+
+       ```yaml
+       spec:
+         containers:
+         - command:
+           - kube-apiserver
+           - --audit-policy-file=/etc/kubernetes/audit/audit-policy.yaml
+           - --audit-log-path=/var/log/kubernetes/audit/audit.log
+           - --audit-log-maxage=30
+           - --audit-log-maxbackup=10
+           - --audit-log-maxsize=100
+           - --audit-log-format=json
+           volumeMounts:
+           - name: audit-policy
+             mountPath: /etc/kubernetes/audit
+             readOnly: true
+           - name: audit-log
+             mountPath: /var/log/kubernetes/audit
+             readOnly: false
+         volumes:
+         - name: audit-policy
+           hostPath:
+             path: /etc/kubernetes/audit
+             type: DirectoryOrCreate
+         - name: audit-log
+           hostPath:
+             path: /var/log/kubernetes/audit
+             type: DirectoryOrCreate
+       ```
+
+    4. Wait for kube-apiserver to restart automatically
+
+    5. Verify audit logging:
+       ```bash
+       sudo tail -f /var/log/kubernetes/audit/audit.log
+       ```
+
+    ## For managed Kubernetes:
+
+    ### EKS:
+    ```bash
+    # Enable control plane logging
+    aws eks update-cluster-config \
+      --region us-east-1 \
+      --name my-cluster \
+      --logging '{"clusterLogging":[{"types":["api","audit","authenticator","controllerManager","scheduler"],"enabled":true}]}'
+
+    # Logs will be sent to CloudWatch Logs
+    ```
+
+    ### GKE:
+    ```bash
+    # Enable audit logging
+    gcloud container clusters update CLUSTER_NAME \
+      --enable-cloud-logging \
+      --logging=SYSTEM,WORKLOAD,API_SERVER
+
+    # Logs will be sent to Cloud Logging
+    ```
+
+    ### AKS:
+    ```bash
+    # Enable diagnostic settings
+    az monitor diagnostic-settings create \
+      --resource /subscriptions/SUBSCRIPTION_ID/resourceGroups/RESOURCE_GROUP/providers/Microsoft.ContainerService/managedClusters/CLUSTER_NAME \
+      --name audit-logs \
+      --logs '[{"category": "kube-audit", "enabled": true}]' \
+      --workspace WORKSPACE_ID
+
+    # Logs will be sent to Azure Monitor
+    ```
+
+---
+# Audit Webhook Backend Configuration (for real-time log shipping)
+apiVersion: v1
+kind: Config
+clusters:
+- name: audit-webhook
+  cluster:
+    server: http://audit-webhook-service.kube-system.svc.cluster.local:8080/audit
+    # For external webhook, use https://audit.example.com/webhook
+    # certificate-authority: /etc/kubernetes/pki/audit-webhook-ca.crt
+contexts:
+- name: default
+  context:
+    cluster: audit-webhook
+    user: ""
+current-context: default
+users: []
+preferences: {}
+
+---
+# Audit Webhook Service (receives audit events in real-time)
+apiVersion: v1
+kind: Service
+metadata:
+  name: audit-webhook-service
+  namespace: kube-system
+spec:
+  selector:
+    app: audit-webhook
+  ports:
+  - name: webhook
+    port: 8080
+    targetPort: 8080
+    protocol: TCP
+  type: ClusterIP
+
+---
+# Audit Webhook Deployment (example - processes and forwards audit logs)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: audit-webhook
+  namespace: kube-system
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: audit-webhook
+  template:
+    metadata:
+      labels:
+        app: audit-webhook
+    spec:
+      serviceAccountName: audit-webhook
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        fsGroup: 65534
+      containers:
+      - name: webhook
+        image: falcosecurity/falcosidekick:latest  # Example: can forward to various backends
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: webhook
+          containerPort: 8080
+        env:
+        - name: WEBHOOK_ADDRESS
+          value: "0.0.0.0:8080"
+        # Configure outputs (Elasticsearch, Slack, etc.)
+        - name: ELASTICSEARCH_HOSTPORT
+          value: "elasticsearch.logging.svc.cluster.local:9200"
+        - name: ELASTICSEARCH_INDEX
+          value: "k8s-audit"
+        - name: SLACK_WEBHOOKURL
+          valueFrom:
+            secretKeyRef:
+              name: audit-webhook-secrets
+              key: slack-webhook-url
+              optional: true
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          capabilities:
+            drop:
+            - ALL
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: audit-webhook
+  namespace: kube-system
+
+---
+# Logrotate configuration for audit logs (on each control plane node)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: audit-logrotate
+  namespace: kube-system
+data:
+  kubernetes-audit: |
+    /var/log/kubernetes/audit/*.log {
+        daily
+        rotate 30
+        compress
+        delaycompress
+        missingok
+        notifempty
+        create 0640 root root
+        sharedscripts
+        postrotate
+            # Send signal to re-open log file
+            /usr/bin/killall -SIGUSR1 kube-apiserver || true
+        endscript
+    }
+
+  install-logrotate.sh: |
+    #!/bin/bash
+    # Run on each control plane node to setup logrotate
+
+    cat > /etc/logrotate.d/kubernetes-audit <<'EOF'
+    /var/log/kubernetes/audit/*.log {
+        daily
+        rotate 30
+        compress
+        delaycompress
+        missingok
+        notifempty
+        create 0640 root root
+        sharedscripts
+    }
+    EOF
+
+    echo "Logrotate configuration installed"

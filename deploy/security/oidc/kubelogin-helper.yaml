@@ -1,0 +1,104 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubelogin-setup
+  namespace: auth-system
+data:
+  setup-kubeconfig.sh: |
+    #!/bin/bash
+    # Helper script to configure kubectl with OIDC authentication
+
+    set -e
+
+    DEX_URL="${DEX_URL:-https://dex.example.com}"
+    CLIENT_ID="${CLIENT_ID:-kubernetes}"
+    CLIENT_SECRET="${CLIENT_SECRET:-kubernetes-client-secret}"
+    CLUSTER_NAME="${CLUSTER_NAME:-kubernetes}"
+
+    echo "Configuring kubectl for OIDC authentication..."
+
+    # Install kubectl oidc-login plugin (kubelogin)
+    if ! command -v kubectl-oidc_login &> /dev/null; then
+        echo "Installing kubelogin..."
+        VERSION="v1.28.0"
+        OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+        ARCH="$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
+        curl -LO "https://github.com/int128/kubelogin/releases/download/${VERSION}/kubelogin_${OS}_${ARCH}.zip"
+        unzip kubelogin_${OS}_${ARCH}.zip
+        sudo mv kubelogin /usr/local/bin/kubectl-oidc_login
+        chmod +x /usr/local/bin/kubectl-oidc_login
+        rm kubelogin_${OS}_${ARCH}.zip
+    fi
+
+    # Configure kubectl user with OIDC
+    kubectl config set-credentials oidc-user \
+      --exec-api-version=client.authentication.k8s.io/v1beta1 \
+      --exec-command=kubectl \
+      --exec-arg=oidc-login \
+      --exec-arg=get-token \
+      --exec-arg=--oidc-issuer-url=${DEX_URL} \
+      --exec-arg=--oidc-client-id=${CLIENT_ID} \
+      --exec-arg=--oidc-client-secret=${CLIENT_SECRET} \
+      --exec-arg=--oidc-extra-scope=email \
+      --exec-arg=--oidc-extra-scope=groups \
+      --exec-arg=--oidc-extra-scope=profile
+
+    # Create context using OIDC user
+    kubectl config set-context ${CLUSTER_NAME}-oidc \
+      --cluster=${CLUSTER_NAME} \
+      --user=oidc-user
+
+    echo "OIDC authentication configured successfully!"
+    echo "Switch to OIDC context with: kubectl config use-context ${CLUSTER_NAME}-oidc"
+    echo "Test authentication with: kubectl get pods"
+
+  login-flow.sh: |
+    #!/bin/bash
+    # Manual OIDC login flow for testing
+
+    DEX_URL="${DEX_URL:-https://dex.example.com}"
+    CLIENT_ID="${CLIENT_ID:-kubernetes}"
+    CLIENT_SECRET="${CLIENT_SECRET:-kubernetes-client-secret}"
+    REDIRECT_URI="${REDIRECT_URI:-http://localhost:8000}"
+
+    echo "Starting OIDC login flow..."
+    echo "1. Opening browser for authentication..."
+    echo "2. Authorize URL: ${DEX_URL}/auth?client_id=${CLIENT_ID}&redirect_uri=${REDIRECT_URI}&response_type=code&scope=openid+email+groups+profile"
+
+    # Start local callback server
+    python3 -c "
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    from urllib.parse import parse_qs, urlparse
+    import sys
+
+    class CallbackHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            query = parse_qs(urlparse(self.path).query)
+            if 'code' in query:
+                code = query['code'][0]
+                self.send_response(200)
+                self.send_header('Content-type', 'text/html')
+                self.end_headers()
+                self.wfile.write(b'<html><body><h1>Authentication successful!</h1><p>You can close this window.</p></body></html>')
+                print(f'Authorization code: {code}')
+                sys.exit(0)
+
+        def log_message(self, format, *args):
+            pass
+
+    httpd = HTTPServer(('localhost', 8000), CallbackHandler)
+    print('Waiting for callback on http://localhost:8000...')
+    httpd.serve_forever()
+    " &
+
+    # Open browser
+    if command -v xdg-open &> /dev/null; then
+        xdg-open "${DEX_URL}/auth?client_id=${CLIENT_ID}&redirect_uri=${REDIRECT_URI}&response_type=code&scope=openid+email+groups+profile"
+    elif command -v open &> /dev/null; then
+        open "${DEX_URL}/auth?client_id=${CLIENT_ID}&redirect_uri=${REDIRECT_URI}&response_type=code&scope=openid+email+groups+profile"
+    else
+        echo "Please open this URL in your browser:"
+        echo "${DEX_URL}/auth?client_id=${CLIENT_ID}&redirect_uri=${REDIRECT_URI}&response_type=code&scope=openid+email+groups+profile"
+    fi
+
+    wait

@@ -1,0 +1,474 @@
+---
+# On-Call Schedule and Escalation Policy Configuration
+# This file documents the on-call rotation and escalation procedures
+# Actual on-call scheduling is typically managed in PagerDuty, OpsGenie, or similar tools
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oncall-policy
+  namespace: monitoring
+  labels:
+    app: alertmanager
+    component: oncall
+data:
+  # On-call rotation configuration
+  oncall-rotation.yaml: |
+    # Primary On-Call Rotation
+    # Rotates weekly, Sunday to Sunday
+    primary_oncall:
+      rotation: weekly
+      start_day: sunday
+      team_members:
+        - name: "Team Member 1"
+          email: "member1@example.com"
+          phone: "+1-555-0101"
+          pagerduty_id: "PXXXXXX"
+          slack: "@member1"
+        - name: "Team Member 2"
+          email: "member2@example.com"
+          phone: "+1-555-0102"
+          pagerduty_id: "PYYYYYY"
+          slack: "@member2"
+        - name: "Team Member 3"
+          email: "member3@example.com"
+          phone: "+1-555-0103"
+          pagerduty_id: "PZZZZZZ"
+          slack: "@member3"
+
+    # Secondary On-Call Rotation (Escalation)
+    secondary_oncall:
+      rotation: weekly
+      start_day: sunday
+      team_members:
+        - name: "Senior Engineer 1"
+          email: "senior1@example.com"
+          phone: "+1-555-0201"
+          pagerduty_id: "PAAAAAA"
+          slack: "@senior1"
+        - name: "Senior Engineer 2"
+          email: "senior2@example.com"
+          phone: "+1-555-0202"
+          pagerduty_id: "PBBBBBB"
+          slack: "@senior2"
+
+    # Security On-Call (24/7)
+    security_oncall:
+      rotation: weekly
+      team_members:
+        - name: "Security Team Lead"
+          email: "security-lead@example.com"
+          phone: "+1-555-0301"
+          pagerduty_id: "PCCCCCC"
+          slack: "@security-lead"
+        - name: "Security Engineer 1"
+          email: "sec-eng1@example.com"
+          phone: "+1-555-0302"
+          pagerduty_id: "PDDDDDD"
+          slack: "@sec-eng1"
+
+  # Escalation policy definition
+  escalation-policy.yaml: |
+    escalation_policies:
+      # Critical Infrastructure Escalation
+      critical_infrastructure:
+        name: "Critical Infrastructure Escalation"
+        description: "For critical infrastructure alerts (API server down, etcd issues, node failures)"
+        levels:
+          - level: 1
+            delay: 0m
+            targets:
+              - type: user
+                target: primary_oncall
+            notification_channels:
+              - pagerduty
+              - slack
+              - phone
+
+          - level: 2
+            delay: 15m
+            targets:
+              - type: user
+                target: secondary_oncall
+            notification_channels:
+              - pagerduty
+              - phone
+            condition: "if not acknowledged"
+
+          - level: 3
+            delay: 30m
+            targets:
+              - type: schedule
+                target: engineering_manager
+            notification_channels:
+              - pagerduty
+              - phone
+              - email
+            condition: "if not resolved"
+
+      # Security Incident Escalation
+      security_incident:
+        name: "Security Incident Escalation"
+        description: "For security-related alerts"
+        levels:
+          - level: 1
+            delay: 0m
+            targets:
+              - type: user
+                target: security_oncall
+              - type: user
+                target: primary_oncall
+            notification_channels:
+              - pagerduty
+              - slack
+              - phone
+
+          - level: 2
+            delay: 10m
+            targets:
+              - type: user
+                target: security_team_lead
+            notification_channels:
+              - pagerduty
+              - phone
+            condition: "if not acknowledged"
+
+          - level: 3
+            delay: 20m
+            targets:
+              - type: schedule
+                target: ciso
+            notification_channels:
+              - pagerduty
+              - phone
+              - email
+            condition: "if not resolved"
+
+      # Application Alerts Escalation
+      application_alerts:
+        name: "Application Alerts Escalation"
+        description: "For application performance and availability issues"
+        levels:
+          - level: 1
+            delay: 0m
+            targets:
+              - type: user
+                target: primary_oncall
+            notification_channels:
+              - slack
+
+          - level: 2
+            delay: 30m
+            targets:
+              - type: user
+                target: primary_oncall
+            notification_channels:
+              - pagerduty
+            condition: "if not acknowledged"
+
+          - level: 3
+            delay: 60m
+            targets:
+              - type: user
+                target: secondary_oncall
+            notification_channels:
+              - pagerduty
+              - phone
+            condition: "if not resolved"
+
+      # Warning Alerts Escalation
+      warning_alerts:
+        name: "Warning Alerts Escalation"
+        description: "For non-critical warning alerts"
+        levels:
+          - level: 1
+            delay: 0m
+            targets:
+              - type: channel
+                target: slack_warnings
+            notification_channels:
+              - slack
+
+          - level: 2
+            delay: 4h
+            targets:
+              - type: user
+                target: primary_oncall
+            notification_channels:
+              - slack
+            condition: "if not resolved"
+
+      # SLO Breach Escalation
+      slo_breach:
+        name: "SLO Breach Escalation"
+        description: "For SLO violations and error budget exhaustion"
+        levels:
+          - level: 1
+            delay: 0m
+            targets:
+              - type: channel
+                target: slo_channel
+              - type: user
+                target: primary_oncall
+            notification_channels:
+              - slack
+              - email
+
+          - level: 2
+            delay: 2h
+            targets:
+              - type: user
+                target: engineering_manager
+            notification_channels:
+              - email
+            condition: "if not resolved"
+
+          - level: 3
+            delay: 24h
+            targets:
+              - type: schedule
+                target: leadership_team
+            notification_channels:
+              - email
+            condition: "if not resolved"
+
+  # Alert acknowledgment SLA
+  sla-requirements.yaml: |
+    alert_sla:
+      critical:
+        acknowledgment_time: 15m
+        resolution_time: 4h
+        description: "Critical alerts must be acknowledged within 15 minutes and resolved within 4 hours"
+
+      high:
+        acknowledgment_time: 30m
+        resolution_time: 8h
+        description: "High severity alerts must be acknowledged within 30 minutes and resolved within 8 hours"
+
+      warning:
+        acknowledgment_time: 4h
+        resolution_time: 24h
+        description: "Warning alerts should be acknowledged within 4 hours and resolved within 24 hours"
+
+      security:
+        acknowledgment_time: 10m
+        resolution_time: 2h
+        description: "Security alerts must be acknowledged within 10 minutes and resolved within 2 hours"
+
+---
+# PagerDuty Integration Configuration
+# This CRD configures PagerDuty integration for Kubernetes
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pagerduty-config
+  namespace: monitoring
+data:
+  config.yaml: |
+    pagerduty:
+      # Service configurations
+      services:
+        critical-infrastructure:
+          service_id: "PSERVICE1"
+          integration_key: "${PAGERDUTY_CRITICAL_KEY}"
+          escalation_policy: "critical_infrastructure"
+          urgency: high
+
+        security-alerts:
+          service_id: "PSERVICE2"
+          integration_key: "${PAGERDUTY_SECURITY_KEY}"
+          escalation_policy: "security_incident"
+          urgency: high
+
+        application-alerts:
+          service_id: "PSERVICE3"
+          integration_key: "${PAGERDUTY_APP_KEY}"
+          escalation_policy: "application_alerts"
+          urgency: low
+
+        slo-alerts:
+          service_id: "PSERVICE4"
+          integration_key: "${PAGERDUTY_SLO_KEY}"
+          escalation_policy: "slo_breach"
+          urgency: low
+
+      # Incident settings
+      incident_settings:
+        auto_resolve: true
+        auto_resolve_timeout: 4h
+        acknowledge_timeout: 30m
+        group_incidents: true
+        group_window: 5m
+
+---
+# Slack Integration Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: slack-channel-config
+  namespace: monitoring
+data:
+  channels.yaml: |
+    slack_channels:
+      alerts-critical:
+        webhook_url: "${SLACK_WEBHOOK_CRITICAL}"
+        description: "Critical alerts requiring immediate attention"
+        mentions:
+          - "@oncall"
+          - "@platform-team"
+
+      alerts-warnings:
+        webhook_url: "${SLACK_WEBHOOK_WARNINGS}"
+        description: "Warning level alerts for awareness"
+
+      security-alerts:
+        webhook_url: "${SLACK_WEBHOOK_SECURITY}"
+        description: "Security-related alerts and incidents"
+        mentions:
+          - "@security-team"
+          - "@oncall"
+
+      infrastructure-alerts:
+        webhook_url: "${SLACK_WEBHOOK_INFRA}"
+        description: "Infrastructure and cluster health alerts"
+
+      app-alerts:
+        webhook_url: "${SLACK_WEBHOOK_APP}"
+        description: "Application performance and availability alerts"
+
+      slo-alerts:
+        webhook_url: "${SLACK_WEBHOOK_SLO}"
+        description: "SLO breach and error budget alerts"
+        mentions:
+          - "@engineering-managers"
+
+---
+# On-Call Dashboard Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oncall-dashboard
+  namespace: monitoring
+data:
+  dashboard.json: |
+    {
+      "title": "On-Call Dashboard",
+      "description": "Current on-call engineers and alert statistics",
+      "panels": [
+        {
+          "title": "Current On-Call Engineers",
+          "type": "table",
+          "datasource": "PagerDuty",
+          "targets": [
+            {
+              "target": "current_oncall_users"
+            }
+          ]
+        },
+        {
+          "title": "Alerts by Severity (Last 24h)",
+          "type": "pie",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "sum by (severity) (ALERTS{alertstate='firing'})"
+            }
+          ]
+        },
+        {
+          "title": "Alert Response Times",
+          "type": "graph",
+          "datasource": "Prometheus",
+          "targets": [
+            {
+              "expr": "alertmanager_notification_latency_seconds"
+            }
+          ]
+        },
+        {
+          "title": "Open Incidents",
+          "type": "stat",
+          "datasource": "PagerDuty",
+          "targets": [
+            {
+              "target": "open_incidents_count"
+            }
+          ]
+        },
+        {
+          "title": "Mean Time to Acknowledge",
+          "type": "stat",
+          "datasource": "PagerDuty",
+          "targets": [
+            {
+              "target": "mean_time_to_acknowledge"
+            }
+          ]
+        },
+        {
+          "title": "Mean Time to Resolve",
+          "type": "stat",
+          "datasource": "PagerDuty",
+          "targets": [
+            {
+              "target": "mean_time_to_resolve"
+            }
+          ]
+        }
+      ]
+    }
+
+  # Setup instructions
+  README.md: |
+    # On-Call Setup Instructions
+
+    ## PagerDuty Configuration
+
+    1. Create services in PagerDuty:
+       - Critical Infrastructure Alerts
+       - Security Alerts
+       - Application Alerts
+       - SLO Alerts
+
+    2. Set up escalation policies in PagerDuty matching the policies defined in escalation-policy.yaml
+
+    3. Create integration keys for each service and update the alertmanager-secrets
+
+    4. Configure on-call schedules in PagerDuty:
+       - Primary on-call rotation
+       - Secondary on-call rotation
+       - Security on-call rotation
+
+    ## Slack Configuration
+
+    1. Create Slack channels:
+       - #alerts-critical
+       - #alerts-warnings
+       - #security-alerts
+       - #infrastructure-alerts
+       - #app-alerts
+       - #slo-alerts
+
+    2. Create Slack incoming webhooks for each channel
+
+    3. Update alertmanager-secrets with webhook URLs
+
+    4. Add AlertManager bot to channels
+
+    ## Testing
+
+    1. Test each notification channel:
+       ```bash
+       kubectl exec -n monitoring alertmanager-0 -- amtool alert add test severity=warning
+       ```
+
+    2. Verify escalation by not acknowledging alerts
+
+    3. Check on-call dashboard for metrics
+
+    ## Maintenance
+
+    - Update on-call rotations weekly
+    - Review escalation policies quarterly
+    - Test notification channels monthly
+    - Update contact information as needed

@@ -21,7 +21,22 @@
       "mcp__task-master-ai__add_subtask",
       "Bash(tee:*)",
       "Bash(kubectl:*)",
-      "Bash(chmod:*)"
+      "Bash(chmod:*)",
+      "Read(//tmp/**)",
+      "mcp__task-master-ai__next_task",
+      "Bash(pkill:*)",
+      "Bash(env)",
+      "mcp__task-master-ai__models",
+      "mcp__task-master-ai__set_task_status",
+      "mcp__task-master-ai__update_subtask",
+      "mcp__task-master-ai__update_task",
+      "Bash(do echo:*)",
+      "Bash(timeout 30 npx -y task-master-ai get-task --id=11 --projectRoot=/home/calelin/dev/podinfo)",
+      "Bash(awk:*)",
+      "Bash(/dev/null)",
+      "Bash(echo \"✓ $file is valid\")",
+      "Bash(echo:*)",
+      "Bash(python3 -c \"import yaml; yaml.safe_load_all(open(''$file''))\")"
     ]
   },
   "enableAllProjectMcpServers": true,

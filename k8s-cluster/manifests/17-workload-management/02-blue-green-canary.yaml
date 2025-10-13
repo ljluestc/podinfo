@@ -1,0 +1,425 @@
+---
+# Blue Deployment (Stable Version)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: podinfo-blue
+  namespace: workload-demo
+  labels:
+    app: podinfo
+    version: blue
+    deployment-strategy: blue-green
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: podinfo
+      version: blue
+  template:
+    metadata:
+      labels:
+        app: podinfo
+        version: blue
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9797"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 2000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: podinfo
+        image: ghcr.io/stefanprodan/podinfo:6.9.1
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL
+        ports:
+        - name: http
+          containerPort: 9898
+          protocol: TCP
+        - name: http-metrics
+          containerPort: 9797
+          protocol: TCP
+        command:
+        - ./podinfo
+        - --port=9898
+        - --port-metrics=9797
+        - --level=info
+        env:
+        - name: PODINFO_UI_COLOR
+          value: "#0000FF"
+        - name: PODINFO_UI_MESSAGE
+          value: "Blue (Stable)"
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 9898
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 9898
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 64Mi
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: data
+        emptyDir: {}
+---
+# Green Deployment (New Version)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: podinfo-green
+  namespace: workload-demo
+  labels:
+    app: podinfo
+    version: green
+    deployment-strategy: blue-green
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: podinfo
+      version: green
+  template:
+    metadata:
+      labels:
+        app: podinfo
+        version: green
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9797"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 2000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: podinfo
+        image: ghcr.io/stefanprodan/podinfo:6.9.2
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL
+        ports:
+        - name: http
+          containerPort: 9898
+          protocol: TCP
+        - name: http-metrics
+          containerPort: 9797
+          protocol: TCP
+        command:
+        - ./podinfo
+        - --port=9898
+        - --port-metrics=9797
+        - --level=info
+        env:
+        - name: PODINFO_UI_COLOR
+          value: "#00FF00"
+        - name: PODINFO_UI_MESSAGE
+          value: "Green (New)"
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 9898
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 9898
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 64Mi
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: data
+        emptyDir: {}
+---
+# Service for Blue-Green (points to active deployment)
+# Switch between blue and green by changing the version selector
+apiVersion: v1
+kind: Service
+metadata:
+  name: podinfo-bluegreen
+  namespace: workload-demo
+  labels:
+    app: podinfo
+    deployment-strategy: blue-green
+spec:
+  type: ClusterIP
+  selector:
+    app: podinfo
+    version: blue  # Change to 'green' to switch traffic
+  ports:
+  - name: http
+    port: 9898
+    protocol: TCP
+    targetPort: http
+---
+# Preview Service for Green (testing before switch)
+apiVersion: v1
+kind: Service
+metadata:
+  name: podinfo-green-preview
+  namespace: workload-demo
+  labels:
+    app: podinfo
+    deployment-strategy: blue-green
+spec:
+  type: ClusterIP
+  selector:
+    app: podinfo
+    version: green
+  ports:
+  - name: http
+    port: 9898
+    protocol: TCP
+    targetPort: http
+---
+# Canary Deployment (Stable Version)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: podinfo-canary-stable
+  namespace: workload-demo
+  labels:
+    app: podinfo-canary
+    version: stable
+    deployment-strategy: canary
+spec:
+  replicas: 9  # 90% of traffic
+  selector:
+    matchLabels:
+      app: podinfo-canary
+      version: stable
+  template:
+    metadata:
+      labels:
+        app: podinfo-canary
+        version: stable
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9797"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 2000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: podinfo
+        image: ghcr.io/stefanprodan/podinfo:6.9.1
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL
+        ports:
+        - name: http
+          containerPort: 9898
+          protocol: TCP
+        - name: http-metrics
+          containerPort: 9797
+          protocol: TCP
+        command:
+        - ./podinfo
+        - --port=9898
+        - --port-metrics=9797
+        - --level=info
+        env:
+        - name: PODINFO_UI_COLOR
+          value: "#FFD700"
+        - name: PODINFO_UI_MESSAGE
+          value: "Stable"
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 9898
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 9898
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 64Mi
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: data
+        emptyDir: {}
+---
+# Canary Deployment (New Version - 10% traffic)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: podinfo-canary-new
+  namespace: workload-demo
+  labels:
+    app: podinfo-canary
+    version: canary
+    deployment-strategy: canary
+spec:
+  replicas: 1  # 10% of traffic
+  selector:
+    matchLabels:
+      app: podinfo-canary
+      version: canary
+  template:
+    metadata:
+      labels:
+        app: podinfo-canary
+        version: canary
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9797"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 2000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: podinfo
+        image: ghcr.io/stefanprodan/podinfo:6.9.2
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL
+        ports:
+        - name: http
+          containerPort: 9898
+          protocol: TCP
+        - name: http-metrics
+          containerPort: 9797
+          protocol: TCP
+        command:
+        - ./podinfo
+        - --port=9898
+        - --port-metrics=9797
+        - --level=info
+        env:
+        - name: PODINFO_UI_COLOR
+          value: "#FFA500"
+        - name: PODINFO_UI_MESSAGE
+          value: "Canary"
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 9898
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 9898
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 64Mi
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: data
+        emptyDir: {}
+---
+# Service for Canary (load balances between stable and canary)
+apiVersion: v1
+kind: Service
+metadata:
+  name: podinfo-canary
+  namespace: workload-demo
+  labels:
+    app: podinfo-canary
+    deployment-strategy: canary
+spec:
+  type: ClusterIP
+  selector:
+    app: podinfo-canary
+  ports:
+  - name: http
+    port: 9898
+    protocol: TCP
+    targetPort: http
+  - name: http-metrics
+    port: 9797
+    protocol: TCP
+    targetPort: http-metrics

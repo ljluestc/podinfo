@@ -1,0 +1,463 @@
+---
+# Prometheus Rules for Autoscaling Monitoring
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: autoscaling-alerts
+  namespace: monitoring
+  labels:
+    app: autoscaling
+    component: monitoring
+spec:
+  groups:
+  - name: hpa.rules
+    interval: 30s
+    rules:
+    # HPA at max replicas
+    - alert: HPAMaxedOut
+      expr: |
+        kube_horizontalpodautoscaler_status_current_replicas{job="kube-state-metrics"}
+        >=
+        kube_horizontalpodautoscaler_spec_max_replicas{job="kube-state-metrics"}
+      for: 15m
+      labels:
+        severity: warning
+        component: autoscaling
+      annotations:
+        summary: "HPA {{ $labels.namespace }}/{{ $labels.horizontalpodautoscaler }} at maximum capacity"
+        description: "HPA {{ $labels.namespace }}/{{ $labels.horizontalpodautoscaler }} has been at max replicas ({{ $value }}) for 15 minutes"
+        runbook_url: "https://runbooks.example.com/hpa-maxed-out"
+
+    # HPA unable to scale
+    - alert: HPAUnableToScale
+      expr: |
+        kube_horizontalpodautoscaler_status_condition{status="false",condition="AbleToScale"}
+        == 1
+      for: 5m
+      labels:
+        severity: warning
+        component: autoscaling
+      annotations:
+        summary: "HPA {{ $labels.namespace }}/{{ $labels.horizontalpodautoscaler }} unable to scale"
+        description: "HPA is unable to compute the replica count"
+
+    # HPA scaling velocity
+    - alert: HPAHighScalingVelocity
+      expr: |
+        abs(rate(kube_horizontalpodautoscaler_status_current_replicas[5m])) > 0.5
+      for: 10m
+      labels:
+        severity: info
+        component: autoscaling
+      annotations:
+        summary: "HPA {{ $labels.namespace }}/{{ $labels.horizontalpodautoscaler }} scaling frequently"
+        description: "HPA is scaling rapidly which may indicate instability"
+
+    # HPA metric unavailable
+    - alert: HPAMetricUnavailable
+      expr: |
+        kube_horizontalpodautoscaler_status_condition{status="false",condition="ScalingActive"}
+        == 1
+      for: 5m
+      labels:
+        severity: warning
+        component: autoscaling
+      annotations:
+        summary: "HPA {{ $labels.namespace }}/{{ $labels.horizontalpodautoscaler }} metric unavailable"
+        description: "HPA cannot obtain metrics for scaling decisions"
+
+  - name: vpa.rules
+    interval: 30s
+    rules:
+    # VPA recommendation differs significantly from requests
+    - alert: VPARecommendationMismatch
+      expr: |
+        abs(
+          kube_verticalpodautoscaler_status_recommendation_containerrecommendations_target
+          -
+          kube_pod_container_resource_requests
+        ) / kube_pod_container_resource_requests > 0.5
+      for: 1h
+      labels:
+        severity: info
+        component: autoscaling
+      annotations:
+        summary: "VPA recommendation differs significantly from current requests"
+        description: "VPA recommends {{ $value | humanizePercentage }} different resources for {{ $labels.namespace }}/{{ $labels.pod }}"
+
+    # VPA updater errors
+    - alert: VPAUpdaterErrors
+      expr: |
+        rate(vpa_updater_evictions_total{result="error"}[5m]) > 0
+      for: 10m
+      labels:
+        severity: warning
+        component: autoscaling
+      annotations:
+        summary: "VPA updater experiencing errors"
+        description: "VPA updater has error rate of {{ $value }} evictions/sec"
+
+  - name: cluster-autoscaler.rules
+    interval: 30s
+    rules:
+    # Cluster Autoscaler errors
+    - alert: ClusterAutoscalerErrors
+      expr: |
+        rate(cluster_autoscaler_errors_total[5m]) > 0.1
+      for: 10m
+      labels:
+        severity: warning
+        component: autoscaling
+      annotations:
+        summary: "Cluster Autoscaler experiencing errors"
+        description: "Cluster Autoscaler error rate is {{ $value }} errors/sec"
+
+    # Unschedulable pods
+    - alert: UnschedulablePods
+      expr: |
+        cluster_autoscaler_unschedulable_pods_count > 0
+      for: 10m
+      labels:
+        severity: warning
+        component: autoscaling
+      annotations:
+        summary: "Pods cannot be scheduled"
+        description: "{{ $value }} pods are unschedulable - cluster may need scaling"
+
+    # Node scale up failures
+    - alert: NodeScaleUpFailures
+      expr: |
+        rate(cluster_autoscaler_failed_scale_ups_total[5m]) > 0
+      for: 10m
+      labels:
+        severity: critical
+        component: autoscaling
+      annotations:
+        summary: "Cluster Autoscaler failing to scale up nodes"
+        description: "Node scale up failure rate: {{ $value }} failures/sec"
+
+    # Nodes at capacity
+    - alert: ClusterAtMaxNodes
+      expr: |
+        cluster_autoscaler_nodes_count >= cluster_autoscaler_max_nodes_count
+      for: 15m
+      labels:
+        severity: warning
+        component: autoscaling
+      annotations:
+        summary: "Cluster at maximum node count"
+        description: "Cluster has reached max nodes ({{ $value }})"
+
+  - name: keda.rules
+    interval: 30s
+    rules:
+    # KEDA scaler errors
+    - alert: KEDAScalerErrors
+      expr: |
+        rate(keda_scaler_errors_total[5m]) > 0.1
+      for: 5m
+      labels:
+        severity: warning
+        component: autoscaling
+      annotations:
+        summary: "KEDA scaler experiencing errors"
+        description: "KEDA scaler {{ $labels.scaledObject }} error rate: {{ $value }}"
+
+    # KEDA scaled object paused
+    - alert: KEDAScaledObjectPaused
+      expr: |
+        keda_scaledobject_paused == 1
+      for: 10m
+      labels:
+        severity: info
+        component: autoscaling
+      annotations:
+        summary: "KEDA ScaledObject is paused"
+        description: "ScaledObject {{ $labels.namespace }}/{{ $labels.scaledObject }} is paused"
+
+  - name: resource-utilization.rules
+    interval: 30s
+    rules:
+    # High CPU utilization triggering scale
+    - alert: HighCPUUtilizationWithoutScaling
+      expr: |
+        (
+          sum(rate(container_cpu_usage_seconds_total{container!=""}[5m])) by (namespace, pod)
+          /
+          sum(container_spec_cpu_quota{container!=""}/container_spec_cpu_period{container!=""}) by (namespace, pod)
+        ) > 0.9
+      for: 10m
+      labels:
+        severity: warning
+        component: autoscaling
+      annotations:
+        summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} at high CPU without scaling"
+        description: "CPU utilization is {{ $value | humanizePercentage }} but pod hasn't scaled"
+
+    # High memory utilization
+    - alert: HighMemoryUtilizationWithoutScaling
+      expr: |
+        (
+          sum(container_memory_working_set_bytes{container!=""}) by (namespace, pod)
+          /
+          sum(container_spec_memory_limit_bytes{container!=""}) by (namespace, pod)
+        ) > 0.9
+      for: 10m
+      labels:
+        severity: warning
+        component: autoscaling
+      annotations:
+        summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} at high memory without scaling"
+        description: "Memory utilization is {{ $value | humanizePercentage }}"
+
+---
+# Grafana Dashboard ConfigMap for Autoscaling
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: autoscaling-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+    app: autoscaling
+data:
+  autoscaling-overview.json: |
+    {
+      "dashboard": {
+        "title": "Kubernetes Autoscaling Overview",
+        "uid": "autoscaling-overview",
+        "tags": ["kubernetes", "autoscaling"],
+        "timezone": "browser",
+        "panels": [
+          {
+            "id": 1,
+            "title": "HPA Current vs Desired Replicas",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "kube_horizontalpodautoscaler_status_current_replicas",
+                "legendFormat": "{{ namespace }}/{{ horizontalpodautoscaler }} - current"
+              },
+              {
+                "expr": "kube_horizontalpodautoscaler_status_desired_replicas",
+                "legendFormat": "{{ namespace }}/{{ horizontalpodautoscaler }} - desired"
+              }
+            ],
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+          },
+          {
+            "id": 2,
+            "title": "HPA CPU Utilization",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "kube_horizontalpodautoscaler_status_current_metrics_average_utilization{metric_name=\"cpu\"}",
+                "legendFormat": "{{ namespace }}/{{ horizontalpodautoscaler }}"
+              }
+            ],
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+          },
+          {
+            "id": 3,
+            "title": "Cluster Autoscaler Node Count",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "cluster_autoscaler_nodes_count",
+                "legendFormat": "Current nodes"
+              },
+              {
+                "expr": "cluster_autoscaler_max_nodes_count",
+                "legendFormat": "Max nodes"
+              }
+            ],
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+          },
+          {
+            "id": 4,
+            "title": "Unschedulable Pods",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "cluster_autoscaler_unschedulable_pods_count",
+                "legendFormat": "Unschedulable pods"
+              }
+            ],
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+          },
+          {
+            "id": 5,
+            "title": "VPA Recommendations vs Requests",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "kube_verticalpodautoscaler_status_recommendation_containerrecommendations_target{resource=\"cpu\"}",
+                "legendFormat": "{{ namespace }}/{{ verticalpodautoscaler }} - recommended CPU"
+              },
+              {
+                "expr": "kube_pod_container_resource_requests{resource=\"cpu\"}",
+                "legendFormat": "{{ namespace }}/{{ pod }} - current CPU request"
+              }
+            ],
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16}
+          },
+          {
+            "id": 6,
+            "title": "KEDA Scaled Objects",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "count(keda_scaledobject_errors_total) by (scaledObject)",
+                "legendFormat": "{{ scaledObject }}"
+              }
+            ],
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16}
+          },
+          {
+            "id": 7,
+            "title": "Autoscaling Events Rate",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "rate(kube_horizontalpodautoscaler_status_current_replicas[5m])",
+                "legendFormat": "HPA scaling rate - {{ namespace }}/{{ horizontalpodautoscaler }}"
+              },
+              {
+                "expr": "rate(cluster_autoscaler_scaled_up_nodes_total[5m])",
+                "legendFormat": "Cluster scale up rate"
+              },
+              {
+                "expr": "rate(cluster_autoscaler_scaled_down_nodes_total[5m])",
+                "legendFormat": "Cluster scale down rate"
+              }
+            ],
+            "gridPos": {"h": 8, "w": 24, "x": 0, "y": 24}
+          }
+        ]
+      }
+    }
+
+---
+# ServiceMonitor for HPA Metrics
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: kube-state-metrics-hpa
+  namespace: monitoring
+  labels:
+    app: kube-state-metrics
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kube-state-metrics
+  endpoints:
+  - port: http-metrics
+    interval: 30s
+    path: /metrics
+
+---
+# Custom Metrics for Autoscaling (Prometheus Adapter)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-adapter-config
+  namespace: monitoring
+data:
+  config.yaml: |
+    rules:
+    # HTTP request rate
+    - seriesQuery: 'http_requests_total{namespace!="",pod!=""}'
+      resources:
+        overrides:
+          namespace: {resource: "namespace"}
+          pod: {resource: "pod"}
+      name:
+        matches: "^(.*)_total"
+        as: "${1}_per_second"
+      metricsQuery: 'sum(rate(<<.Series>>{<<.LabelMatchers>>}[2m])) by (<<.GroupBy>>)'
+
+    # HTTP request duration
+    - seriesQuery: 'http_request_duration_seconds{namespace!="",pod!=""}'
+      resources:
+        overrides:
+          namespace: {resource: "namespace"}
+          pod: {resource: "pod"}
+      name:
+        matches: "^(.*)_seconds"
+        as: "${1}_p99"
+      metricsQuery: 'histogram_quantile(0.99, sum(rate(<<.Series>>_bucket{<<.LabelMatchers>>}[2m])) by (le, <<.GroupBy>>))'
+
+    # Queue depth
+    - seriesQuery: 'queue_depth{namespace!="",pod!=""}'
+      resources:
+        overrides:
+          namespace: {resource: "namespace"}
+          pod: {resource: "pod"}
+      name:
+        matches: "^(.*)$"
+        as: "$1"
+      metricsQuery: 'avg(<<.Series>>{<<.LabelMatchers>>}) by (<<.GroupBy>>)'
+
+    # Error rate
+    - seriesQuery: 'http_errors_total{namespace!="",pod!=""}'
+      resources:
+        overrides:
+          namespace: {resource: "namespace"}
+          pod: {resource: "pod"}
+      name:
+        matches: "^(.*)_total"
+        as: "${1}_per_second"
+      metricsQuery: 'sum(rate(<<.Series>>{<<.LabelMatchers>>}[2m])) by (<<.GroupBy>>)'
+
+---
+# Autoscaling Cost Tracking Dashboard
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: autoscaling-cost-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  autoscaling-costs.json: |
+    {
+      "dashboard": {
+        "title": "Autoscaling Cost Analysis",
+        "uid": "autoscaling-costs",
+        "tags": ["kubernetes", "autoscaling", "cost"],
+        "panels": [
+          {
+            "id": 1,
+            "title": "Estimated Node Costs Over Time",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "sum(cluster_autoscaler_nodes_count) * 0.096",
+                "legendFormat": "Estimated hourly cost (USD)"
+              }
+            ]
+          },
+          {
+            "id": 2,
+            "title": "Pod Density (Pods per Node)",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "sum(kube_pod_info) / sum(kube_node_info)",
+                "legendFormat": "Average pods per node"
+              }
+            ]
+          },
+          {
+            "id": 3,
+            "title": "Resource Utilization by Node",
+            "type": "heatmap",
+            "targets": [
+              {
+                "expr": "sum(rate(container_cpu_usage_seconds_total[5m])) by (node) / sum(kube_node_status_allocatable{resource=\"cpu\"}) by (node)"
+              }
+            ]
+          }
+        ]
+      }
+    }

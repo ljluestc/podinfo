@@ -1,0 +1,600 @@
+---
+# Test Suite for Autoscaling Validation
+# This file contains test workloads and validation scripts
+
+---
+# ConfigMap with test scripts
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: autoscaling-tests
+  namespace: default
+data:
+  test-hpa.sh: |
+    #!/bin/bash
+    set -e
+
+    echo "========================================="
+    echo "HPA Testing Suite"
+    echo "========================================="
+    echo ""
+
+    # Test 1: Verify HPA exists
+    echo "Test 1: Checking HPA configuration..."
+    if kubectl get hpa podinfo-hpa &> /dev/null; then
+        echo "✓ HPA exists"
+    else
+        echo "✗ HPA not found"
+        exit 1
+    fi
+
+    # Test 2: Check HPA metrics
+    echo ""
+    echo "Test 2: Verifying HPA metrics availability..."
+    HPA_STATUS=$(kubectl get hpa podinfo-hpa -o jsonpath='{.status.conditions[?(@.type=="ScalingActive")].status}')
+    if [ "$HPA_STATUS" = "True" ]; then
+        echo "✓ HPA metrics available"
+    else
+        echo "✗ HPA cannot get metrics"
+        kubectl describe hpa podinfo-hpa
+        exit 1
+    fi
+
+    # Test 3: Generate load and verify scaling
+    echo ""
+    echo "Test 3: Load testing HPA scaling..."
+    INITIAL_REPLICAS=$(kubectl get hpa podinfo-hpa -o jsonpath='{.status.currentReplicas}')
+    echo "Initial replicas: $INITIAL_REPLICAS"
+
+    # Start load generator
+    echo "Starting load generator..."
+    kubectl run load-generator-hpa --image=busybox:1.28 --restart=Never -- /bin/sh -c "while true; do wget -q -O- http://podinfo.default.svc.cluster.local; done" &
+    LOAD_PID=$!
+
+    # Wait for scaling
+    echo "Waiting 120 seconds for HPA to scale up..."
+    sleep 120
+
+    # Check if scaled up
+    CURRENT_REPLICAS=$(kubectl get hpa podinfo-hpa -o jsonpath='{.status.currentReplicas}')
+    echo "Current replicas: $CURRENT_REPLICAS"
+
+    # Stop load generator
+    kubectl delete pod load-generator-hpa --force --grace-period=0 &> /dev/null || true
+
+    if [ "$CURRENT_REPLICAS" -gt "$INITIAL_REPLICAS" ]; then
+        echo "✓ HPA scaled up successfully ($INITIAL_REPLICAS -> $CURRENT_REPLICAS replicas)"
+    else
+        echo "✗ HPA did not scale up"
+        exit 1
+    fi
+
+    # Test 4: Verify scale down
+    echo ""
+    echo "Test 4: Verifying scale down behavior..."
+    echo "Waiting 300 seconds for scale down..."
+    sleep 300
+
+    FINAL_REPLICAS=$(kubectl get hpa podinfo-hpa -o jsonpath='{.status.currentReplicas}')
+    echo "Final replicas: $FINAL_REPLICAS"
+
+    if [ "$FINAL_REPLICAS" -lt "$CURRENT_REPLICAS" ]; then
+        echo "✓ HPA scaled down successfully"
+    else
+        echo "⚠ HPA has not scaled down yet (may need more time)"
+    fi
+
+    echo ""
+    echo "HPA Test Suite Complete!"
+
+  test-vpa.sh: |
+    #!/bin/bash
+    set -e
+
+    echo "========================================="
+    echo "VPA Testing Suite"
+    echo "========================================="
+    echo ""
+
+    # Test 1: Verify VPA exists
+    echo "Test 1: Checking VPA installation..."
+    if kubectl get vpa &> /dev/null; then
+        echo "✓ VPA is installed"
+    else
+        echo "✗ VPA CRD not found - VPA not installed"
+        exit 1
+    fi
+
+    # Test 2: Check VPA configurations
+    echo ""
+    echo "Test 2: Verifying VPA configurations..."
+    if kubectl get vpa podinfo-vpa &> /dev/null; then
+        echo "✓ VPA configuration exists"
+    else
+        echo "✗ VPA configuration not found"
+        exit 1
+    fi
+
+    # Test 3: Verify VPA recommendations
+    echo ""
+    echo "Test 3: Checking VPA recommendations..."
+
+    # Wait for recommendations to be generated
+    echo "Waiting for VPA to generate recommendations (60 seconds)..."
+    sleep 60
+
+    RECOMMENDATION=$(kubectl get vpa podinfo-vpa -o jsonpath='{.status.recommendation.containerRecommendations[0].target.cpu}')
+
+    if [ -n "$RECOMMENDATION" ]; then
+        echo "✓ VPA generated recommendations"
+        echo "  CPU target: $RECOMMENDATION"
+        kubectl get vpa podinfo-vpa -o jsonpath='{.status.recommendation.containerRecommendations[0]}' | jq .
+    else
+        echo "⚠ VPA recommendations not available yet (may need more time and metrics)"
+    fi
+
+    # Test 4: Verify VPA components
+    echo ""
+    echo "Test 4: Checking VPA components..."
+    COMPONENTS=("vpa-recommender" "vpa-updater" "vpa-admission-controller")
+
+    for component in "${COMPONENTS[@]}"; do
+        if kubectl get pods -n kube-system -l app=$component 2>/dev/null | grep -q Running; then
+            echo "✓ $component is running"
+        else
+            echo "⚠ $component not found or not running"
+        fi
+    done
+
+    echo ""
+    echo "VPA Test Suite Complete!"
+
+  test-keda.sh: |
+    #!/bin/bash
+    set -e
+
+    echo "========================================="
+    echo "KEDA Testing Suite"
+    echo "========================================="
+    echo ""
+
+    # Test 1: Verify KEDA installation
+    echo "Test 1: Checking KEDA installation..."
+    if kubectl get pods -n keda | grep -q keda-operator; then
+        echo "✓ KEDA is installed"
+    else
+        echo "✗ KEDA not found"
+        exit 1
+    fi
+
+    # Test 2: Check KEDA components
+    echo ""
+    echo "Test 2: Verifying KEDA components..."
+    KEDA_OPERATOR=$(kubectl get pods -n keda -l app=keda-operator -o jsonpath='{.items[0].status.phase}')
+    KEDA_METRICS=$(kubectl get pods -n keda -l app=keda-operator-metrics-apiserver -o jsonpath='{.items[0].status.phase}')
+
+    if [ "$KEDA_OPERATOR" = "Running" ]; then
+        echo "✓ KEDA operator is running"
+    else
+        echo "✗ KEDA operator not running"
+        exit 1
+    fi
+
+    if [ "$KEDA_METRICS" = "Running" ]; then
+        echo "✓ KEDA metrics server is running"
+    else
+        echo "✗ KEDA metrics server not running"
+        exit 1
+    fi
+
+    # Test 3: Check ScaledObjects
+    echo ""
+    echo "Test 3: Checking ScaledObjects..."
+    SCALEDOBJECTS=$(kubectl get scaledobjects --all-namespaces --no-headers 2>/dev/null | wc -l)
+    echo "Found $SCALEDOBJECTS ScaledObject(s)"
+
+    if [ "$SCALEDOBJECTS" -gt 0 ]; then
+        echo "✓ ScaledObjects configured"
+        kubectl get scaledobjects --all-namespaces
+    else
+        echo "⚠ No ScaledObjects found"
+    fi
+
+    # Test 4: Verify external metrics API
+    echo ""
+    echo "Test 4: Checking external metrics API..."
+    if kubectl get --raw /apis/external.metrics.k8s.io/v1beta1 &> /dev/null; then
+        echo "✓ External metrics API available"
+    else
+        echo "✗ External metrics API not available"
+        exit 1
+    fi
+
+    echo ""
+    echo "KEDA Test Suite Complete!"
+
+  test-cluster-autoscaler.sh: |
+    #!/bin/bash
+    set -e
+
+    echo "========================================="
+    echo "Cluster Autoscaler Testing Suite"
+    echo "========================================="
+    echo ""
+
+    # Test 1: Verify Cluster Autoscaler deployment
+    echo "Test 1: Checking Cluster Autoscaler deployment..."
+    if kubectl get deployment cluster-autoscaler -n kube-system &> /dev/null; then
+        echo "✓ Cluster Autoscaler is deployed"
+    else
+        echo "✗ Cluster Autoscaler not found"
+        exit 1
+    fi
+
+    # Test 2: Check if running
+    echo ""
+    echo "Test 2: Verifying Cluster Autoscaler is running..."
+    CA_STATUS=$(kubectl get deployment cluster-autoscaler -n kube-system -o jsonpath='{.status.conditions[?(@.type=="Available")].status}')
+
+    if [ "$CA_STATUS" = "True" ]; then
+        echo "✓ Cluster Autoscaler is running"
+    else
+        echo "✗ Cluster Autoscaler not available"
+        kubectl describe deployment cluster-autoscaler -n kube-system
+        exit 1
+    fi
+
+    # Test 3: Check for errors in logs
+    echo ""
+    echo "Test 3: Checking for errors in logs..."
+    ERROR_COUNT=$(kubectl logs -n kube-system -l app.kubernetes.io/name=cluster-autoscaler --tail=100 | grep -i error | wc -l)
+
+    if [ "$ERROR_COUNT" -eq 0 ]; then
+        echo "✓ No errors in recent logs"
+    else
+        echo "⚠ Found $ERROR_COUNT error(s) in logs"
+        echo "Recent errors:"
+        kubectl logs -n kube-system -l app.kubernetes.io/name=cluster-autoscaler --tail=100 | grep -i error | tail -5
+    fi
+
+    # Test 4: Check node count and limits
+    echo ""
+    echo "Test 4: Checking node configuration..."
+    CURRENT_NODES=$(kubectl get nodes --no-headers | wc -l)
+    echo "Current node count: $CURRENT_NODES"
+
+    # Test 5: Create unschedulable pods to trigger scaling
+    echo ""
+    echo "Test 5: Testing scale-up behavior..."
+    echo "Creating deployment with high resource requests..."
+
+    kubectl create deployment scale-test --image=nginx:alpine --replicas=10 || true
+    kubectl set resources deployment scale-test --requests=cpu=2,memory=4Gi --limits=cpu=2,memory=4Gi || true
+
+    echo "Waiting 180 seconds for Cluster Autoscaler to react..."
+    sleep 180
+
+    NEW_NODE_COUNT=$(kubectl get nodes --no-headers | wc -l)
+    echo "Node count after scale test: $NEW_NODE_COUNT"
+
+    if [ "$NEW_NODE_COUNT" -gt "$CURRENT_NODES" ]; then
+        echo "✓ Cluster Autoscaler scaled up nodes ($CURRENT_NODES -> $NEW_NODE_COUNT)"
+    else
+        echo "⚠ No new nodes added (check if cluster has capacity or if pods can be scheduled)"
+    fi
+
+    # Cleanup
+    echo ""
+    echo "Cleaning up test deployment..."
+    kubectl delete deployment scale-test --force --grace-period=0 || true
+
+    echo ""
+    echo "Note: Node scale-down may take 10-15 minutes based on configuration"
+    echo ""
+    echo "Cluster Autoscaler Test Suite Complete!"
+
+  test-metrics-server.sh: |
+    #!/bin/bash
+    set -e
+
+    echo "========================================="
+    echo "Metrics Server Testing Suite"
+    echo "========================================="
+    echo ""
+
+    # Test 1: Verify Metrics Server deployment
+    echo "Test 1: Checking Metrics Server deployment..."
+    if kubectl get deployment metrics-server -n kube-system &> /dev/null; then
+        echo "✓ Metrics Server is deployed"
+    else
+        echo "✗ Metrics Server not found"
+        exit 1
+    fi
+
+    # Test 2: Check if running
+    echo ""
+    echo "Test 2: Verifying Metrics Server is running..."
+    MS_STATUS=$(kubectl get deployment metrics-server -n kube-system -o jsonpath='{.status.conditions[?(@.type=="Available")].status}')
+
+    if [ "$MS_STATUS" = "True" ]; then
+        echo "✓ Metrics Server is running"
+    else
+        echo "✗ Metrics Server not available"
+        kubectl describe deployment metrics-server -n kube-system
+        exit 1
+    fi
+
+    # Test 3: Test metrics API
+    echo ""
+    echo "Test 3: Testing metrics API..."
+    if kubectl get --raw /apis/metrics.k8s.io/v1beta1/nodes &> /dev/null; then
+        echo "✓ Node metrics API available"
+    else
+        echo "✗ Node metrics API not available"
+        exit 1
+    fi
+
+    if kubectl get --raw /apis/metrics.k8s.io/v1beta1/pods &> /dev/null; then
+        echo "✓ Pod metrics API available"
+    else
+        echo "✗ Pod metrics API not available"
+        exit 1
+    fi
+
+    # Test 4: Check kubectl top
+    echo ""
+    echo "Test 4: Testing 'kubectl top' commands..."
+
+    echo "Node metrics:"
+    if kubectl top nodes &> /dev/null; then
+        kubectl top nodes
+        echo "✓ Node metrics working"
+    else
+        echo "✗ Node metrics not available"
+        exit 1
+    fi
+
+    echo ""
+    echo "Pod metrics (default namespace):"
+    if kubectl top pods &> /dev/null; then
+        kubectl top pods
+        echo "✓ Pod metrics working"
+    else
+        echo "✗ Pod metrics not available"
+        exit 1
+    fi
+
+    echo ""
+    echo "Metrics Server Test Suite Complete!"
+
+  run-all-tests.sh: |
+    #!/bin/bash
+
+    echo "========================================="
+    echo "Running All Autoscaling Tests"
+    echo "========================================="
+    echo ""
+
+    FAILED_TESTS=0
+
+    # Run Metrics Server tests
+    echo "Running Metrics Server tests..."
+    if bash test-metrics-server.sh; then
+        echo "✓ Metrics Server tests passed"
+    else
+        echo "✗ Metrics Server tests failed"
+        FAILED_TESTS=$((FAILED_TESTS + 1))
+    fi
+    echo ""
+
+    # Run HPA tests
+    echo "Running HPA tests..."
+    if bash test-hpa.sh; then
+        echo "✓ HPA tests passed"
+    else
+        echo "✗ HPA tests failed"
+        FAILED_TESTS=$((FAILED_TESTS + 1))
+    fi
+    echo ""
+
+    # Run VPA tests
+    echo "Running VPA tests..."
+    if bash test-vpa.sh; then
+        echo "✓ VPA tests passed"
+    else
+        echo "✗ VPA tests failed"
+        FAILED_TESTS=$((FAILED_TESTS + 1))
+    fi
+    echo ""
+
+    # Run KEDA tests
+    echo "Running KEDA tests..."
+    if bash test-keda.sh; then
+        echo "✓ KEDA tests passed"
+    else
+        echo "✗ KEDA tests failed"
+        FAILED_TESTS=$((FAILED_TESTS + 1))
+    fi
+    echo ""
+
+    # Run Cluster Autoscaler tests
+    echo "Running Cluster Autoscaler tests..."
+    if bash test-cluster-autoscaler.sh; then
+        echo "✓ Cluster Autoscaler tests passed"
+    else
+        echo "✗ Cluster Autoscaler tests failed"
+        FAILED_TESTS=$((FAILED_TESTS + 1))
+    fi
+    echo ""
+
+    echo "========================================="
+    echo "Test Summary"
+    echo "========================================="
+    if [ $FAILED_TESTS -eq 0 ]; then
+        echo "✓ All tests passed!"
+        exit 0
+    else
+        echo "✗ $FAILED_TESTS test suite(s) failed"
+        exit 1
+    fi
+
+---
+# Job to run all autoscaling tests
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: autoscaling-tests
+  namespace: default
+  labels:
+    app: autoscaling-tests
+spec:
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: autoscaling-tests
+    spec:
+      serviceAccountName: autoscaling-test-sa
+      restartPolicy: Never
+      containers:
+      - name: test-runner
+        image: bitnami/kubectl:latest
+        command:
+        - /bin/bash
+        - -c
+        - |
+          cd /tests
+          bash run-all-tests.sh
+        volumeMounts:
+        - name: test-scripts
+          mountPath: /tests
+      volumes:
+      - name: test-scripts
+        configMap:
+          name: autoscaling-tests
+          defaultMode: 0755
+
+---
+# ServiceAccount for test runner
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: autoscaling-test-sa
+  namespace: default
+
+---
+# ClusterRole for test runner
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: autoscaling-test-role
+rules:
+- apiGroups: [""]
+  resources: ["nodes", "pods", "services"]
+  verbs: ["get", "list", "watch", "create", "delete"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets", "statefulsets"]
+  verbs: ["get", "list", "watch", "create", "delete", "patch"]
+- apiGroups: ["autoscaling"]
+  resources: ["horizontalpodautoscalers"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["autoscaling.k8s.io"]
+  resources: ["verticalpodautoscalers"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["keda.sh"]
+  resources: ["scaledobjects", "scaledjobs", "triggerauthentications"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["metrics.k8s.io"]
+  resources: ["nodes", "pods"]
+  verbs: ["get", "list"]
+- apiGroups: ["external.metrics.k8s.io"]
+  resources: ["*"]
+  verbs: ["get", "list"]
+
+---
+# ClusterRoleBinding for test runner
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: autoscaling-test-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: autoscaling-test-role
+subjects:
+- kind: ServiceAccount
+  name: autoscaling-test-sa
+  namespace: default
+
+---
+# Test workload for HPA validation
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hpa-test-app
+  namespace: default
+  labels:
+    app: hpa-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hpa-test
+  template:
+    metadata:
+      labels:
+        app: hpa-test
+    spec:
+      containers:
+      - name: app
+        image: nginx:alpine
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+        ports:
+        - containerPort: 80
+
+---
+# Service for HPA test app
+apiVersion: v1
+kind: Service
+metadata:
+  name: hpa-test-app
+  namespace: default
+spec:
+  selector:
+    app: hpa-test
+  ports:
+  - port: 80
+    targetPort: 80
+
+---
+# HPA for test app
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: hpa-test-app
+  namespace: default
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: hpa-test-app
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 50
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0

@@ -1,0 +1,532 @@
+---
+# Traffic Management Configuration
+# This file implements advanced traffic routing, splitting, and mirroring
+# for the podinfo application with canary deployments and A/B testing.
+
+# Gateway - External access point to the mesh
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: podinfo-gateway
+  namespace: podinfo
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  # HTTP server with automatic HTTPS redirect
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - "podinfo.example.com"
+    - "podinfo-canary.example.com"
+    - "*.podinfo.example.com"
+    tls:
+      httpsRedirect: true
+
+  # HTTPS server with TLS termination
+  - port:
+      number: 443
+      name: https
+      protocol: HTTPS
+    hosts:
+    - "podinfo.example.com"
+    - "podinfo-canary.example.com"
+    - "*.podinfo.example.com"
+    tls:
+      mode: SIMPLE
+      credentialName: podinfo-tls-cert
+      minProtocolVersion: TLSV1_3
+
+---
+# Virtual Service - Main routing configuration for podinfo
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: podinfo-routes
+  namespace: podinfo
+spec:
+  hosts:
+  - "podinfo.example.com"
+  - "podinfo.podinfo.svc.cluster.local"
+  - "podinfo"
+  gateways:
+  - podinfo-gateway
+  - mesh  # Internal mesh traffic
+
+  http:
+  # Route 1: Header-based canary routing
+  # Users with X-Canary: true header get canary version
+  - match:
+    - headers:
+        X-Canary:
+          exact: "true"
+    route:
+    - destination:
+        host: podinfo-canary.podinfo.svc.cluster.local
+        port:
+          number: 9898
+    retries:
+      attempts: 3
+      perTryTimeout: 2s
+      retryOn: "5xx,reset,connect-failure,refused-stream"
+    timeout: 10s
+    corsPolicy:
+      allowOrigins:
+      - exact: "https://example.com"
+      allowMethods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      allowHeaders:
+      - content-type
+      - authorization
+      maxAge: 24h
+
+  # Route 2: User-based routing (A/B testing)
+  # Route specific users to canary for testing
+  - match:
+    - headers:
+        X-User-Id:
+          regex: "^(test-user-.*|beta-user-.*)$"
+    route:
+    - destination:
+        host: podinfo-canary.podinfo.svc.cluster.local
+        port:
+          number: 9898
+      weight: 100
+    retries:
+      attempts: 3
+      perTryTimeout: 2s
+    timeout: 10s
+
+  # Route 3: URI-based routing
+  # Route /api/v2 to canary (new API version)
+  - match:
+    - uri:
+        prefix: "/api/v2"
+    rewrite:
+      uri: "/api"
+    route:
+    - destination:
+        host: podinfo-canary.podinfo.svc.cluster.local
+        port:
+          number: 9898
+    retries:
+      attempts: 3
+      perTryTimeout: 2s
+    timeout: 15s
+
+  # Route 4: Weighted traffic split (progressive canary)
+  # 90% stable, 10% canary for gradual rollout
+  - match:
+    - uri:
+        prefix: "/"
+    route:
+    - destination:
+        host: podinfo-stable.podinfo.svc.cluster.local
+        port:
+          number: 9898
+      weight: 90
+      headers:
+        response:
+          set:
+            X-Version: "stable"
+    - destination:
+        host: podinfo-canary.podinfo.svc.cluster.local
+        port:
+          number: 9898
+      weight: 10
+      headers:
+        response:
+          set:
+            X-Version: "canary"
+    retries:
+      attempts: 3
+      perTryTimeout: 2s
+      retryOn: "5xx,reset,connect-failure,refused-stream"
+    timeout: 10s
+    # Fault injection for chaos testing (disabled by default)
+    # fault:
+    #   delay:
+    #     percentage:
+    #       value: 1.0
+    #     fixedDelay: 2s
+    #   abort:
+    #     percentage:
+    #       value: 0.1
+    #     httpStatus: 503
+
+---
+# Virtual Service - gRPC routing
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: podinfo-grpc-routes
+  namespace: podinfo
+spec:
+  hosts:
+  - "podinfo-grpc.example.com"
+  - "podinfo.podinfo.svc.cluster.local"
+  gateways:
+  - podinfo-gateway
+  - mesh
+
+  http:
+  # gRPC uses HTTP/2, so we use http routing
+  - match:
+    - port: 9999
+    route:
+    - destination:
+        host: podinfo-stable.podinfo.svc.cluster.local
+        port:
+          number: 9999
+      weight: 90
+    - destination:
+        host: podinfo-canary.podinfo.svc.cluster.local
+        port:
+          number: 9999
+      weight: 10
+    retries:
+      attempts: 3
+      perTryTimeout: 2s
+    timeout: 10s
+
+---
+# Virtual Service - Traffic mirroring for testing
+# Mirrors production traffic to canary without affecting users
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: podinfo-mirror
+  namespace: podinfo
+spec:
+  hosts:
+  - "podinfo-mirror.example.com"
+  gateways:
+  - podinfo-gateway
+
+  http:
+  - match:
+    - uri:
+        prefix: "/"
+    route:
+    - destination:
+        host: podinfo-stable.podinfo.svc.cluster.local
+        port:
+          number: 9898
+      weight: 100
+    # Mirror 10% of traffic to canary for testing
+    mirror:
+      host: podinfo-canary.podinfo.svc.cluster.local
+      port:
+        number: 9898
+    mirrorPercentage:
+      value: 10.0
+    retries:
+      attempts: 3
+      perTryTimeout: 2s
+    timeout: 10s
+
+---
+# Destination Rule - Circuit breaker and load balancing for stable
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: podinfo-stable-dr
+  namespace: podinfo
+spec:
+  host: podinfo-stable.podinfo.svc.cluster.local
+
+  # Traffic policy for stable service
+  trafficPolicy:
+    # Connection pool settings
+    connectionPool:
+      tcp:
+        maxConnections: 100
+        connectTimeout: 30s
+        tcpKeepalive:
+          time: 7200s
+          interval: 75s
+      http:
+        http1MaxPendingRequests: 50
+        http2MaxRequests: 100
+        maxRequestsPerConnection: 2
+        maxRetries: 3
+        idleTimeout: 900s
+        h2UpgradePolicy: UPGRADE
+
+    # Load balancing configuration
+    loadBalancer:
+      simple: LEAST_REQUEST
+      localityLbSetting:
+        enabled: true
+        failover:
+        - from: us-west-1
+          to: us-east-1
+
+    # Outlier detection (circuit breaker)
+    outlierDetection:
+      consecutiveGatewayErrors: 5
+      consecutive5xxErrors: 5
+      interval: 30s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+      minHealthPercent: 40
+      splitExternalLocalOriginErrors: true
+
+    # mTLS configuration
+    tls:
+      mode: ISTIO_MUTUAL
+      sni: podinfo-stable.podinfo.svc.cluster.local
+
+  # Subset definitions for versioned routing
+  subsets:
+  - name: v1
+    labels:
+      version: "1.0"
+    trafficPolicy:
+      connectionPool:
+        http:
+          maxRequestsPerConnection: 1
+  - name: v2
+    labels:
+      version: "2.0"
+    trafficPolicy:
+      connectionPool:
+        http:
+          maxRequestsPerConnection: 1
+
+---
+# Destination Rule - Circuit breaker for canary
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: podinfo-canary-dr
+  namespace: podinfo
+spec:
+  host: podinfo-canary.podinfo.svc.cluster.local
+
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 50
+        connectTimeout: 30s
+      http:
+        http1MaxPendingRequests: 25
+        http2MaxRequests: 50
+        maxRequestsPerConnection: 2
+        maxRetries: 3
+
+    loadBalancer:
+      simple: ROUND_ROBIN
+
+    # More aggressive circuit breaker for canary
+    outlierDetection:
+      consecutiveGatewayErrors: 3
+      consecutive5xxErrors: 3
+      interval: 30s
+      baseEjectionTime: 60s
+      maxEjectionPercent: 100
+      minHealthPercent: 0
+
+    tls:
+      mode: ISTIO_MUTUAL
+      sni: podinfo-canary.podinfo.svc.cluster.local
+
+---
+# Service Entry - External service access control
+# Allow controlled access to external APIs
+apiVersion: networking.istio.io/v1beta1
+kind: ServiceEntry
+metadata:
+  name: external-apis
+  namespace: podinfo
+spec:
+  hosts:
+  - "api.github.com"
+  - "api.slack.com"
+  ports:
+  - number: 443
+    name: https
+    protocol: HTTPS
+  location: MESH_EXTERNAL
+  resolution: DNS
+
+---
+# Service Entry - Internal service discovery
+apiVersion: networking.istio.io/v1beta1
+kind: ServiceEntry
+metadata:
+  name: internal-services
+  namespace: podinfo
+spec:
+  hosts:
+  - "prometheus.monitoring.svc.cluster.local"
+  - "grafana.monitoring.svc.cluster.local"
+  - "jaeger.observability.svc.cluster.local"
+  ports:
+  - number: 9090
+    name: prometheus
+    protocol: HTTP
+  - number: 3000
+    name: grafana
+    protocol: HTTP
+  - number: 16686
+    name: jaeger
+    protocol: HTTP
+  location: MESH_INTERNAL
+  resolution: DNS
+
+---
+# Egress Gateway for external traffic
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: podinfo-egress-gateway
+  namespace: podinfo
+spec:
+  selector:
+    istio: egressgateway
+  servers:
+  - port:
+      number: 443
+      name: https
+      protocol: HTTPS
+    hosts:
+    - "api.github.com"
+    - "api.slack.com"
+    tls:
+      mode: PASSTHROUGH
+
+---
+# Virtual Service - Route through egress gateway
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: external-apis-via-egress
+  namespace: podinfo
+spec:
+  hosts:
+  - "api.github.com"
+  - "api.slack.com"
+  gateways:
+  - mesh
+  - podinfo-egress-gateway
+
+  tls:
+  - match:
+    - gateways:
+      - mesh
+      port: 443
+      sniHosts:
+      - "api.github.com"
+      - "api.slack.com"
+    route:
+    - destination:
+        host: istio-egressgateway.istio-system.svc.cluster.local
+        port:
+          number: 443
+
+  - match:
+    - gateways:
+      - podinfo-egress-gateway
+      port: 443
+      sniHosts:
+      - "api.github.com"
+      - "api.slack.com"
+    route:
+    - destination:
+        host: "api.github.com"
+        port:
+          number: 443
+      weight: 50
+    - destination:
+        host: "api.slack.com"
+        port:
+          number: 443
+      weight: 50
+
+---
+# Sidecar - Optimize sidecar configuration
+# Reduces resource usage by limiting what the sidecar proxies
+apiVersion: networking.istio.io/v1beta1
+kind: Sidecar
+metadata:
+  name: podinfo-sidecar
+  namespace: podinfo
+spec:
+  workloadSelector:
+    labels:
+      app: podinfo
+
+  ingress:
+  - port:
+      number: 9898
+      protocol: HTTP
+      name: http
+    defaultEndpoint: 0.0.0.0:9898
+  - port:
+      number: 9999
+      protocol: GRPC
+      name: grpc
+    defaultEndpoint: 0.0.0.0:9999
+
+  egress:
+  # Allow access to services in the same namespace
+  - hosts:
+    - "./podinfo-stable.podinfo.svc.cluster.local"
+    - "./podinfo-canary.podinfo.svc.cluster.local"
+    - "./podinfo.podinfo.svc.cluster.local"
+
+  # Allow access to istio-system
+  - hosts:
+    - "istio-system/*"
+
+  # Allow access to monitoring
+  - hosts:
+    - "monitoring/prometheus.monitoring.svc.cluster.local"
+    - "monitoring/grafana.monitoring.svc.cluster.local"
+
+  # Allow access to observability
+  - hosts:
+    - "observability/jaeger-collector.observability.svc.cluster.local"
+
+  # Allow external APIs through egress gateway
+  - hosts:
+    - "*/api.github.com"
+    - "*/api.slack.com"
+
+  outboundTrafficPolicy:
+    mode: REGISTRY_ONLY
+
+---
+# Telemetry - Custom metrics for traffic management
+apiVersion: telemetry.istio.io/v1alpha1
+kind: Telemetry
+metadata:
+  name: traffic-metrics
+  namespace: podinfo
+spec:
+  metrics:
+  - providers:
+    - name: prometheus
+    dimensions:
+      canary_version:
+        value: response.headers['X-Version'] | "unknown"
+      request_path:
+        value: request.url_path
+      response_code:
+        value: response.code | 0
+  - providers:
+    - name: prometheus
+    overrides:
+    - match:
+        metric: REQUEST_COUNT
+      tagOverrides:
+        destination_version:
+          value: destination.labels['version'] | "unknown"
+        source_version:
+          value: source.labels['version'] | "unknown"

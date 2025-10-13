@@ -1,0 +1,234 @@
+---
+# PodDisruptionBudget for Rolling Update Deployments
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: podinfo-rolling-pdb
+  namespace: workload-demo
+  labels:
+    app: podinfo-rolling
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: podinfo-rolling
+---
+# PodDisruptionBudget for Blue-Green Deployments (Blue)
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: podinfo-blue-pdb
+  namespace: workload-demo
+  labels:
+    app: podinfo
+    version: blue
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: podinfo
+      version: blue
+---
+# PodDisruptionBudget for Blue-Green Deployments (Green)
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: podinfo-green-pdb
+  namespace: workload-demo
+  labels:
+    app: podinfo
+    version: green
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: podinfo
+      version: green
+---
+# PodDisruptionBudget for Canary Stable
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: podinfo-canary-stable-pdb
+  namespace: workload-demo
+  labels:
+    app: podinfo-canary
+    version: stable
+spec:
+  minAvailable: 80%
+  selector:
+    matchLabels:
+      app: podinfo-canary
+      version: stable
+---
+# PodDisruptionBudget for Canary New
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: podinfo-canary-new-pdb
+  namespace: workload-demo
+  labels:
+    app: podinfo-canary
+    version: canary
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: podinfo-canary
+      version: canary
+---
+# PodDisruptionBudget for Redis Cluster
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: redis-cluster-pdb
+  namespace: workload-demo
+  labels:
+    app: redis-cluster
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: redis-cluster
+  unhealthyPodEvictionPolicy: AlwaysAllow
+---
+# PodDisruptionBudget for PostgreSQL
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: postgresql-pdb
+  namespace: workload-demo
+  labels:
+    app: postgresql
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: postgresql
+---
+# Aggressive PDB for Critical Services (prevents all voluntary disruptions during business hours)
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: critical-service-pdb
+  namespace: workload-demo
+  labels:
+    app: critical-service
+    availability: high
+spec:
+  minAvailable: 100%
+  selector:
+    matchLabels:
+      app: critical-service
+      tier: production
+---
+# Example Critical Service Deployment (for demonstration)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: critical-service
+  namespace: workload-demo
+  labels:
+    app: critical-service
+    tier: production
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: critical-service
+      tier: production
+  template:
+    metadata:
+      labels:
+        app: critical-service
+        tier: production
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 2000
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - critical-service
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: service
+        image: ghcr.io/stefanprodan/podinfo:6.9.2
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1000
+          capabilities:
+            drop:
+            - ALL
+        ports:
+        - name: http
+          containerPort: 9898
+          protocol: TCP
+        command:
+        - ./podinfo
+        - --port=9898
+        - --level=info
+        env:
+        - name: PODINFO_UI_COLOR
+          value: "#FF0000"
+        - name: PODINFO_UI_MESSAGE
+          value: "Critical Service"
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 9898
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 9898
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          limits:
+            cpu: 500m
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 64Mi
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: data
+          mountPath: /data
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: data
+        emptyDir: {}
+---
+# Service for Critical Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: critical-service
+  namespace: workload-demo
+  labels:
+    app: critical-service
+spec:
+  type: ClusterIP
+  selector:
+    app: critical-service
+    tier: production
+  ports:
+  - name: http
+    port: 9898
+    protocol: TCP
+    targetPort: http

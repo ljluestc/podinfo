@@ -1,0 +1,417 @@
+# Admission Webhooks for Policy Enforcement
+# Validating and Mutating webhooks for security policies
+
+---
+# Validating Webhook Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: validating-webhook
+  namespace: auth-system
+spec:
+  selector:
+    app: validating-webhook
+  ports:
+  - name: https
+    port: 443
+    targetPort: 8443
+    protocol: TCP
+
+---
+# Mutating Webhook Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: mutating-webhook
+  namespace: auth-system
+spec:
+  selector:
+    app: mutating-webhook
+  ports:
+  - name: https
+    port: 443
+    targetPort: 8443
+    protocol: TCP
+
+---
+# Validating Webhook Server
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: validating-webhook
+  namespace: auth-system
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: validating-webhook
+  template:
+    metadata:
+      labels:
+        app: validating-webhook
+    spec:
+      serviceAccountName: admission-webhook
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        fsGroup: 65534
+      containers:
+      - name: webhook
+        image: your-registry.example.com/validating-webhook:v1.0.0  # Replace with actual image
+        imagePullPolicy: IfNotPresent
+        args:
+        - --tls-cert-file=/etc/webhook/certs/tls.crt
+        - --tls-key-file=/etc/webhook/certs/tls.key
+        - --port=8443
+        ports:
+        - name: https
+          containerPort: 8443
+        volumeMounts:
+        - name: webhook-certs
+          mountPath: /etc/webhook/certs
+          readOnly: true
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: webhook-certs
+        secret:
+          secretName: validating-webhook-certs
+
+---
+# Mutating Webhook Server
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mutating-webhook
+  namespace: auth-system
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mutating-webhook
+  template:
+    metadata:
+      labels:
+        app: mutating-webhook
+    spec:
+      serviceAccountName: admission-webhook
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        fsGroup: 65534
+      containers:
+      - name: webhook
+        image: your-registry.example.com/mutating-webhook:v1.0.0  # Replace with actual image
+        imagePullPolicy: IfNotPresent
+        args:
+        - --tls-cert-file=/etc/webhook/certs/tls.crt
+        - --tls-key-file=/etc/webhook/certs/tls.key
+        - --port=8443
+        ports:
+        - name: https
+          containerPort: 8443
+        volumeMounts:
+        - name: webhook-certs
+          mountPath: /etc/webhook/certs
+          readOnly: true
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: webhook-certs
+        secret:
+          secretName: mutating-webhook-certs
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: admission-webhook
+  namespace: auth-system
+
+---
+# RBAC for webhook to read configurations
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: admission-webhook
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["admissionregistration.k8s.io"]
+  resources: ["validatingwebhookconfigurations", "mutatingwebhookconfigurations"]
+  verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: admission-webhook
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: admission-webhook
+subjects:
+- kind: ServiceAccount
+  name: admission-webhook
+  namespace: auth-system
+
+---
+# ValidatingWebhookConfiguration - Security Policy Enforcement
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: security-policy-validator
+webhooks:
+- name: pod-security-policy.security.k8s.io
+  admissionReviewVersions: ["v1", "v1beta1"]
+  clientConfig:
+    service:
+      name: validating-webhook
+      namespace: auth-system
+      path: "/validate-pod-security"
+    caBundle: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUM2RENDQWRDZ0F3SUJBZ0lCQURBTkJna3Foa2lHOXcwQkFRc0ZBREFWTVJNd0VRWURWUVFERXdwcmRXSmwKY201bGRHVnpNQjRYRFRJek1EY3hNREE1TXpRd01Gb1hEVE16TURjd056QTVNelF3TUZvd0ZURVRNQkVHQTFVRQpBeE1LYTNWaVpYSnVaWFJsY3pDQ0FTSXdEUVlKS29aSWh2Y05BUUVCQlFBRGdnRVBBRENDQVFvQ2dnRUJBTURoCmRZUnpYMDh1NWNCdzBQQUFBQUFBQUFBQQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==  # Replace with actual CA bundle
+  rules:
+  - operations: ["CREATE", "UPDATE"]
+    apiGroups: [""]
+    apiVersions: ["v1"]
+    resources: ["pods"]
+  failurePolicy: Fail  # Reject on webhook failure
+  sideEffects: None
+  timeoutSeconds: 10
+  namespaceSelector:
+    matchExpressions:
+    - key: admission.webhook/enabled
+      operator: NotIn
+      values: ["false"]
+
+- name: container-image-policy.security.k8s.io
+  admissionReviewVersions: ["v1"]
+  clientConfig:
+    service:
+      name: validating-webhook
+      namespace: auth-system
+      path: "/validate-image"
+    caBundle: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUM2RENDQWRDZ0F3SUJBZ0lCQURBTkJna3Foa2lHOXcwQkFRc0ZBREFWTVJNd0VRWURWUVFERXdwcmRXSmwKY201bGRHVnpNQjRYRFRJek1EY3hNREE1TXpRd01Gb1hEVE16TURjd056QTVNelF3TUZvd0ZURVRNQkVHQTFVRQpBeE1LYTNWaVpYSnVaWFJsY3pDQ0FTSXdEUVlKS29aSWh2Y05BUUVCQlFBRGdnRVBBRENDQVFvQ2dnRUJBTURoCmRZUnpYMDh1NWNCdzBQQUFBQUFBQUFBQQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==
+  rules:
+  - operations: ["CREATE", "UPDATE"]
+    apiGroups: ["apps", ""]
+    apiVersions: ["*"]
+    resources: ["pods", "deployments", "replicasets", "statefulsets", "daemonsets"]
+  failurePolicy: Fail
+  sideEffects: None
+  timeoutSeconds: 5
+  namespaceSelector:
+    matchExpressions:
+    - key: environment
+      operator: In
+      values: ["production", "staging"]
+
+- name: resource-limits-policy.security.k8s.io
+  admissionReviewVersions: ["v1"]
+  clientConfig:
+    service:
+      name: validating-webhook
+      namespace: auth-system
+      path: "/validate-resources"
+    caBundle: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUM2RENDQWRDZ0F3SUJBZ0lCQURBTkJna3Foa2lHOXcwQkFRc0ZBREFWTVJNd0VRWURWUVFERXdwcmRXSmwKY201bGRHVnpNQjRYRFRJek1EY3hNREE1TXpRd01Gb1hEVE16TURjd056QTVNelF3TUZvd0ZURVRNQkVHQTFVRQpBeE1LYTNWaVpYSnVaWFJsY3pDQ0FTSXdEUVlKS29aSWh2Y05BUUVCQlFBRGdnRVBBRENDQVFvQ2dnRUJBTURoCmRZUnpYMDh1NWNCdzBQQUFBQUFBQUFBQQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==
+  rules:
+  - operations: ["CREATE"]
+    apiGroups: [""]
+    apiVersions: ["v1"]
+    resources: ["pods"]
+  failurePolicy: Fail
+  sideEffects: None
+
+- name: secret-access-policy.security.k8s.io
+  admissionReviewVersions: ["v1"]
+  clientConfig:
+    service:
+      name: validating-webhook
+      namespace: auth-system
+      path: "/validate-secret-access"
+    caBundle: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUM2RENDQWRDZ0F3SUJBZ0lCQURBTkJna3Foa2lHOXcwQkFRc0ZBREFWTVJNd0VRWURWUVFERXdwcmRXSmwKY201bGRHVnpNQjRYRFRJek1EY3hNREE1TXpRd01Gb1hEVE16TURjd056QTVNelF3TUZvd0ZURVRNQkVHQTFVRQpBeE1LYTNWaVpYSnVaWFJsY3pDQ0FTSXdEUVlKS29aSWh2Y05BUUVCQlFBRGdnRVBBRENDQVFvQ2dnRUJBTURoCmRZUnpYMDh1NWNCdzBQQUFBQUFBQUFBQQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==
+  rules:
+  - operations: ["CREATE", "UPDATE", "DELETE"]
+    apiGroups: [""]
+    apiVersions: ["v1"]
+    resources: ["secrets"]
+  failurePolicy: Fail
+  sideEffects: None
+
+---
+# MutatingWebhookConfiguration - Auto-inject security settings
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: security-policy-mutator
+webhooks:
+- name: pod-security-defaults.security.k8s.io
+  admissionReviewVersions: ["v1"]
+  clientConfig:
+    service:
+      name: mutating-webhook
+      namespace: auth-system
+      path: "/mutate-pod-security"
+    caBundle: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUM2RENDQWRDZ0F3SUJBZ0lCQURBTkJna3Foa2lHOXcwQkFRc0ZBREFWTVJNd0VRWURWUVFERXdwcmRXSmwKY251bGRHVnpNQjRYRFRJek1EY3hNREE1TXpRd01Gb1hEVE16TURjd056QTVNelF3TUZvd0ZURVRNQkVHQTFVRQpBeE1LYTNWaVpYSnVaWFJsY3pDQ0FTSXdEUVlKS29aSWh2Y05BUUVCQlFBRGdnRVBBRENDQVFvQ2dnRUJBTURoCmRZUnpYMDh1NWNCdzBQQUFBQUFBQUFBQQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==
+  rules:
+  - operations: ["CREATE"]
+    apiGroups: [""]
+    apiVersions: ["v1"]
+    resources: ["pods"]
+  failurePolicy: Ignore  # Don't block on webhook failure for mutations
+  sideEffects: None
+  timeoutSeconds: 10
+  namespaceSelector:
+    matchExpressions:
+    - key: admission.webhook/inject-defaults
+      operator: NotIn
+      values: ["false"]
+  reinvocationPolicy: Never
+
+- name: service-account-token-projection.security.k8s.io
+  admissionReviewVersions: ["v1"]
+  clientConfig:
+    service:
+      name: mutating-webhook
+      namespace: auth-system
+      path: "/mutate-sa-token"
+    caBundle: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUM2RENDQWRDZ0F3SUJBZ0lCQURBTkJna3Foa2lHOXcwQkFRc0ZBREFWTVJNd0VRWURWUVFERXdwcmRXSmwKY251bGRHVnpNQjRYRFRJek1EY3hNREE1TXpRd01Gb1hEVE16TURjd056QTVNelF3TUZvd0ZURVRNQkVHQTFVRQpBeE1LYTNWaVpYSnVaWFJsY3pDQ0FTSXdEUVlKS29aSWh2Y05BUUVCQlFBRGdnRVBBRENDQVFvQ2dnRUJBTURoCmRZUnpYMDh1NWNCdzBQQUFBQUFBQUFBQQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==
+  rules:
+  - operations: ["CREATE"]
+    apiGroups: [""]
+    apiVersions: ["v1"]
+    resources: ["pods"]
+  failurePolicy: Ignore
+  sideEffects: None
+
+- name: security-labels.security.k8s.io
+  admissionReviewVersions: ["v1"]
+  clientConfig:
+    service:
+      name: mutating-webhook
+      namespace: auth-system
+      path: "/mutate-labels"
+    caBundle: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUM2RENDQWRDZ0F3SUJBZ0lCQURBTkJna3Foa2lHOXcwQkFRc0ZBREFWTVJNd0VRWURWUVFERXdwcmRXSmwKY251bGRHVnpNQjRYRFRJek1EY3hNREE1TXpRd01Gb1hEVE16TURjd056QTVNelF3TUZvd0ZURVRNQkVHQTFVRQpBeE1LYTNWaVpYSnVaWFJsY3pDQ0FTSXdEUVlKS29aSWh2Y05BUUVCQlFBRGdnRVBBRENDQVFvQ2dnRUJBTURoCmRZUnpYMDh1NWNCdzBQQUFBQUFBQUFBQQotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==
+  rules:
+  - operations: ["CREATE"]
+    apiGroups: ["apps", ""]
+    apiVersions: ["*"]
+    resources: ["pods", "deployments", "statefulsets"]
+  failurePolicy: Ignore
+  sideEffects: None
+
+---
+# Webhook Policy Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: webhook-policies
+  namespace: auth-system
+data:
+  pod-security-policy.yaml: |
+    # Pod Security Validations
+    policies:
+      - name: require-non-root
+        description: "Pods must not run as root"
+        validate:
+          message: "Containers must run as non-root user"
+          pattern:
+            spec:
+              securityContext:
+                runAsNonRoot: true
+
+      - name: drop-capabilities
+        description: "Containers must drop all capabilities"
+        validate:
+          message: "Containers must drop all capabilities"
+          pattern:
+            spec:
+              containers:
+              - securityContext:
+                  capabilities:
+                    drop: ["ALL"]
+
+      - name: read-only-root-filesystem
+        description: "Containers should use read-only root filesystem"
+        validate:
+          message: "Containers should use read-only root filesystem"
+          pattern:
+            spec:
+              containers:
+              - securityContext:
+                  readOnlyRootFilesystem: true
+
+  image-policy.yaml: |
+    # Container Image Validations
+    policies:
+      - name: trusted-registry
+        description: "Images must come from trusted registries"
+        allowedRegistries:
+          - "gcr.io"
+          - "your-registry.example.com"
+          - "registry.k8s.io"
+        blockedRegistries:
+          - "docker.io"  # Disallow public Docker Hub
+
+      - name: image-signature
+        description: "Images must be signed"
+        requireSignature: true
+
+      - name: no-latest-tag
+        description: "Images must not use 'latest' tag"
+        blockedTags:
+          - "latest"
+
+  resource-policy.yaml: |
+    # Resource Limits Validations
+    policies:
+      - name: require-resource-limits
+        description: "Containers must have CPU and memory limits"
+        validate:
+          message: "Containers must specify resource limits"
+          pattern:
+            spec:
+              containers:
+              - resources:
+                  limits:
+                    cpu: "*"
+                    memory: "*"
+                  requests:
+                    cpu: "*"
+                    memory: "*"
+
+  secret-policy.yaml: |
+    # Secret Access Validations
+    policies:
+      - name: secret-encryption
+        description: "Secrets must be encrypted at rest"
+        enforceEncryption: true
+
+      - name: secret-audit
+        description: "Secret access must be audited"
+        auditLevel: "RequestResponse"

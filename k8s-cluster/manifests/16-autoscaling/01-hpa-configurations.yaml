@@ -1,0 +1,341 @@
+---
+# Horizontal Pod Autoscaler for Podinfo Application
+# Scales based on CPU, memory, and custom metrics
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: podinfo-hpa
+  namespace: default
+  labels:
+    app: podinfo
+    component: autoscaling
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: podinfo
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  # CPU-based scaling
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  # Memory-based scaling
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  # Custom metrics from Prometheus (requires prometheus-adapter)
+  - type: Pods
+    pods:
+      metric:
+        name: http_requests_per_second
+      target:
+        type: AverageValue
+        averageValue: "1000"
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300  # Wait 5 minutes before scaling down
+      policies:
+      - type: Percent
+        value: 50  # Scale down by max 50% of current replicas
+        periodSeconds: 60
+      - type: Pods
+        value: 2  # Scale down by max 2 pods
+        periodSeconds: 60
+      selectPolicy: Min  # Use the most conservative policy
+    scaleUp:
+      stabilizationWindowSeconds: 0  # Scale up immediately
+      policies:
+      - type: Percent
+        value: 100  # Scale up by max 100% of current replicas
+        periodSeconds: 30
+      - type: Pods
+        value: 4  # Scale up by max 4 pods
+        periodSeconds: 30
+      selectPolicy: Max  # Use the most aggressive policy
+
+---
+# HPA for Production Workloads (Generic)
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: production-app-hpa
+  namespace: production
+  labels:
+    environment: production
+    component: autoscaling
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: production-app
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 60
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 75
+  # Custom metric: request latency
+  - type: Pods
+    pods:
+      metric:
+        name: http_request_duration_seconds
+      target:
+        type: AverageValue
+        averageValue: "0.5"  # Scale if avg latency > 500ms
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 600  # 10 minutes for production
+      policies:
+      - type: Percent
+        value: 25  # Conservative scale down
+        periodSeconds: 120
+      - type: Pods
+        value: 1
+        periodSeconds: 120
+      selectPolicy: Min
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+      - type: Percent
+        value: 200  # Aggressive scale up for production
+        periodSeconds: 15
+      - type: Pods
+        value: 5
+        periodSeconds: 15
+      selectPolicy: Max
+
+---
+# HPA for Background Workers
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: worker-hpa
+  namespace: default
+  labels:
+    app: worker
+    component: autoscaling
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: worker
+  minReplicas: 1
+  maxReplicas: 15
+  metrics:
+  # Workers primarily scale based on queue depth
+  - type: Pods
+    pods:
+      metric:
+        name: queue_depth
+      target:
+        type: AverageValue
+        averageValue: "10"  # 10 messages per pod
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 180
+      policies:
+      - type: Pods
+        value: 2
+        periodSeconds: 60
+      selectPolicy: Min
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+      - type: Pods
+        value: 3
+        periodSeconds: 30
+      selectPolicy: Max
+
+---
+# HPA for Cost-Optimized Workloads
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: cost-optimized-hpa
+  namespace: default
+  labels:
+    cost-profile: optimized
+    component: autoscaling
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: batch-processor
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 85  # Higher threshold for cost savings
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 90
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 900  # 15 minutes - very conservative
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: 180  # Scale down slowly
+      selectPolicy: Min
+    scaleUp:
+      stabilizationWindowSeconds: 60  # Wait before scaling up
+      policies:
+      - type: Pods
+        value: 1
+        periodSeconds: 60
+      selectPolicy: Min
+
+---
+# HPA with External Metrics (e.g., AWS SQS, Cloud Pub/Sub)
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: external-metrics-hpa
+  namespace: default
+  labels:
+    component: autoscaling
+    metric-type: external
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: message-processor
+  minReplicas: 2
+  maxReplicas: 50
+  metrics:
+  # External metric from cloud provider
+  - type: External
+    external:
+      metric:
+        name: sqs_queue_messages_visible
+        selector:
+          matchLabels:
+            queue_name: processing-queue
+      target:
+        type: AverageValue
+        averageValue: "30"  # 30 messages per pod
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 30
+
+---
+# HPA for Microservices with Multiple Metrics
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: microservice-hpa
+  namespace: default
+  labels:
+    component: autoscaling
+    pattern: microservice
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api-gateway
+  minReplicas: 2
+  maxReplicas: 30
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 65
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 75
+  # Request rate
+  - type: Pods
+    pods:
+      metric:
+        name: http_requests_total
+      target:
+        type: AverageValue
+        averageValue: "500"
+  # Error rate (scale up if errors increase)
+  - type: Pods
+    pods:
+      metric:
+        name: http_errors_per_second
+      target:
+        type: AverageValue
+        averageValue: "5"
+  # Response time
+  - type: Pods
+    pods:
+      metric:
+        name: http_request_duration_p99
+      target:
+        type: AverageValue
+        averageValue: "1"  # 1 second p99 latency
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 30
+        periodSeconds: 90
+      - type: Pods
+        value: 2
+        periodSeconds: 90
+      selectPolicy: Min
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 20
+      - type: Pods
+        value: 5
+        periodSeconds: 20
+      selectPolicy: Max

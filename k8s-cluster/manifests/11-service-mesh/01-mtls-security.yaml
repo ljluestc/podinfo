@@ -1,0 +1,349 @@
+---
+# mTLS Configuration and Security Policies
+# This file configures mutual TLS authentication across the service mesh
+# and implements defense-in-depth security policies.
+
+# Global mTLS Policy - Enforce STRICT mTLS cluster-wide
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: default-strict-mtls
+  namespace: istio-system
+spec:
+  mtls:
+    mode: STRICT
+
+---
+# Namespace-specific mTLS for podinfo
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: podinfo-mtls
+  namespace: podinfo
+spec:
+  mtls:
+    mode: STRICT
+  # Allow specific ports to use PERMISSIVE mode for gradual rollout
+  # portLevelMtls:
+  #   9898:
+  #     mode: PERMISSIVE
+
+---
+# Authorization Policy - Default Deny All
+# This implements a zero-trust security model
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: deny-all-default
+  namespace: istio-system
+spec:
+  {}
+
+---
+# Authorization Policy - Allow Prometheus scraping
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-prometheus-scraping
+  namespace: istio-system
+spec:
+  action: ALLOW
+  rules:
+  - from:
+    - source:
+        namespaces: ["monitoring"]
+        principals: ["cluster.local/ns/monitoring/sa/prometheus"]
+    to:
+    - operation:
+        methods: ["GET"]
+        paths: ["/metrics", "/stats/prometheus"]
+
+---
+# Authorization Policy - Allow health checks
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-health-checks
+  namespace: podinfo
+spec:
+  action: ALLOW
+  rules:
+  - to:
+    - operation:
+        methods: ["GET"]
+        paths: ["/healthz", "/readyz", "/livez"]
+
+---
+# Authorization Policy - Allow podinfo ingress traffic
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-podinfo-ingress
+  namespace: podinfo
+spec:
+  selector:
+    matchLabels:
+      app: podinfo
+  action: ALLOW
+  rules:
+  # Allow from ingress gateway
+  - from:
+    - source:
+        namespaces: ["istio-system"]
+        principals: ["cluster.local/ns/istio-system/sa/istio-ingressgateway-service-account"]
+    to:
+    - operation:
+        methods: ["GET", "POST", "PUT", "DELETE", "PATCH"]
+        ports: ["9898", "9999"]
+
+---
+# Authorization Policy - Allow service-to-service communication within podinfo
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-podinfo-internal
+  namespace: podinfo
+spec:
+  selector:
+    matchLabels:
+      app: podinfo
+  action: ALLOW
+  rules:
+  - from:
+    - source:
+        namespaces: ["podinfo"]
+    to:
+    - operation:
+        methods: ["GET", "POST", "PUT", "DELETE", "PATCH"]
+        ports: ["9898", "9999", "9797"]
+
+---
+# Authorization Policy - Allow metrics scraping
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-metrics-scraping
+  namespace: podinfo
+spec:
+  selector:
+    matchLabels:
+      app: podinfo
+  action: ALLOW
+  rules:
+  - from:
+    - source:
+        namespaces: ["monitoring"]
+        principals: ["cluster.local/ns/monitoring/sa/prometheus"]
+    to:
+    - operation:
+        methods: ["GET"]
+        ports: ["9797"]
+        paths: ["/metrics"]
+
+---
+# Authorization Policy - Deny external egress by default
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: deny-external-egress
+  namespace: podinfo
+spec:
+  selector:
+    matchLabels:
+      app: podinfo
+  action: DENY
+  rules:
+  - to:
+    - operation:
+        hosts: ["*"]
+        notPorts: ["9898", "9999", "9797", "443", "80"]
+    when:
+    - key: destination.ip
+      notValues: ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+
+---
+# Request Authentication - JWT validation (optional)
+# Uncomment and configure for JWT-based authentication
+# apiVersion: security.istio.io/v1beta1
+# kind: RequestAuthentication
+# metadata:
+#   name: jwt-auth
+#   namespace: podinfo
+# spec:
+#   selector:
+#     matchLabels:
+#       app: podinfo
+#   jwtRules:
+#   - issuer: "https://your-issuer.com"
+#     jwksUri: "https://your-issuer.com/.well-known/jwks.json"
+#     audiences:
+#     - "your-audience"
+#     forwardOriginalToken: true
+
+---
+# Certificate Management - Custom CA Configuration (optional)
+# For production, integrate with external CA like cert-manager
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cacerts
+  namespace: istio-system
+type: Opaque
+data:
+  # These are placeholder values - replace with your actual CA certificates
+  # In production, use cert-manager or external CA integration
+  ca-cert.pem: ""  # Base64 encoded CA certificate
+  ca-key.pem: ""   # Base64 encoded CA private key
+  root-cert.pem: "" # Base64 encoded root certificate
+  cert-chain.pem: "" # Base64 encoded certificate chain
+
+---
+# Workload Certificate Rotation Configuration
+# Certificates are automatically rotated by Istio
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: istio-security-config
+  namespace: istio-system
+data:
+  # Certificate lifetime configuration
+  workload-cert-ttl: "24h"  # Workload certificate TTL
+  max-workload-cert-ttl: "90d"  # Maximum certificate lifetime
+  ca-cert-ttl: "87600h"  # CA certificate TTL (10 years)
+
+  # Certificate rotation grace period
+  # Certificates are rotated at 75% of their lifetime
+  secret-ttl: "24h"
+  secret-grace-period: "6h"
+
+---
+# mTLS Migration Configuration
+# ConfigMap for managing gradual mTLS rollout
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mtls-migration-config
+  namespace: istio-system
+data:
+  migration-status: "complete"
+  permissive-namespaces: ""  # Comma-separated list of namespaces in PERMISSIVE mode
+  strict-namespaces: "podinfo,default,istio-system"  # Namespaces with STRICT mTLS
+
+---
+# Security Dashboard Integration
+# ServiceMonitor for Istio security metrics
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: istio-security-metrics
+  namespace: istio-system
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: istiod
+  endpoints:
+  - port: http-monitoring
+    interval: 30s
+    path: /metrics
+    relabelings:
+    - sourceLabels: [__meta_kubernetes_pod_name]
+      targetLabel: pod_name
+    - sourceLabels: [__meta_kubernetes_namespace]
+      targetLabel: namespace
+
+---
+# Network Policy - Additional defense layer
+# While Istio provides service mesh security, network policies add kernel-level enforcement
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: istio-mesh-policy
+  namespace: podinfo
+spec:
+  podSelector:
+    matchLabels:
+      app: podinfo
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow from Istio sidecars
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          istio-injection: enabled
+    ports:
+    - protocol: TCP
+      port: 9898
+    - protocol: TCP
+      port: 9999
+  # Allow from ingress gateway
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: istio-system
+      podSelector:
+        matchLabels:
+          app: istio-ingressgateway
+    ports:
+    - protocol: TCP
+      port: 9898
+  # Allow Istio sidecar communication
+  - from:
+    - podSelector: {}
+    ports:
+    - protocol: TCP
+      port: 15090  # Prometheus metrics
+    - protocol: TCP
+      port: 15021  # Health checks
+  egress:
+  # Allow DNS
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+  # Allow to Istio control plane
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: istio-system
+    ports:
+    - protocol: TCP
+      port: 15012  # XDS and CA
+  # Allow service mesh traffic
+  - to:
+    - podSelector: {}
+    ports:
+    - protocol: TCP
+      port: 9898
+    - protocol: TCP
+      port: 9999
+
+---
+# Security Audit Configuration
+# Enable Istio access logs for security audit
+apiVersion: telemetry.istio.io/v1alpha1
+kind: Telemetry
+metadata:
+  name: security-audit-logging
+  namespace: istio-system
+spec:
+  accessLogging:
+  - providers:
+    - name: envoy
+    filter:
+      expression: response.code >= 400 || connection.mtls == false
+  # Log all security-related events
+  - providers:
+    - name: stdout
+    filter:
+      expression: |
+        (response.code >= 400) ||
+        (request.headers['x-forwarded-for'] != '') ||
+        (connection.mtls == false) ||
+        (request.url_path.matches('/admin.*'))

@@ -1,0 +1,456 @@
+---
+# Namespace Configuration for Service Mesh
+# This file configures automatic sidecar injection for application namespaces
+# and sets up mesh-wide policies.
+
+# Update podinfo namespace with Istio injection
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: podinfo
+  labels:
+    name: podinfo
+    app.kubernetes.io/name: podinfo
+    # Enable automatic sidecar injection
+    istio-injection: enabled
+    # Istio revision for canary control plane upgrades
+    # istio.io/rev: default
+    # Network segment (for multi-network meshes)
+    topology.istio.io/network: default
+
+---
+# Observability namespace with Istio injection
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+  labels:
+    name: observability
+    istio-injection: enabled
+    topology.istio.io/network: default
+
+---
+# Monitoring namespace (NO sidecar injection for monitoring tools)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    name: monitoring
+    # Explicitly disable sidecar injection
+    istio-injection: disabled
+
+---
+# Default namespace configuration
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: default
+  labels:
+    istio-injection: enabled
+    topology.istio.io/network: default
+
+---
+# Sidecar injection configuration for fine-grained control
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: istio-sidecar-injector
+  namespace: istio-system
+data:
+  # Values to use for sidecar injection
+  values: |
+    {
+      "global": {
+        "proxy": {
+          "holdApplicationUntilProxyStarts": true,
+          "resources": {
+            "requests": {
+              "cpu": "100m",
+              "memory": "128Mi"
+            },
+            "limits": {
+              "cpu": "2000m",
+              "memory": "1024Mi"
+            }
+          },
+          "logLevel": "warning",
+          "componentLogLevel": "misc:error"
+        }
+      },
+      "sidecarInjectorWebhook": {
+        "rewriteAppHTTPProbe": true,
+        "neverInjectSelector": [
+          {
+            "matchLabels": {
+              "istio-injection": "disabled"
+            }
+          }
+        ],
+        "alwaysInjectSelector": [
+          {
+            "matchLabels": {
+              "istio-injection": "enabled"
+            }
+          }
+        ],
+        "injectedAnnotations": {
+          "prometheus.io/scrape": "true",
+          "prometheus.io/port": "15020",
+          "prometheus.io/path": "/stats/prometheus"
+        }
+      }
+    }
+
+  # Injection template
+  template: |
+    containers:
+    - name: istio-proxy
+      image: auto
+      args:
+      - proxy
+      - sidecar
+      - --domain
+      - $(POD_NAMESPACE).svc.cluster.local
+      - --proxyLogLevel=warning
+      - --proxyComponentLogLevel=misc:error
+      - --log_output_level=default:info
+      env:
+      - name: ISTIO_META_GENERATOR
+        value: grpc
+      - name: OUTPUT_CERTS
+        value: /etc/istio/proxy
+      - name: JWT_POLICY
+        value: third-party-jwt
+      - name: PILOT_CERT_PROVIDER
+        value: istiod
+      - name: CA_ADDR
+        value: istiod.istio-system.svc:15012
+      - name: POD_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.name
+      - name: POD_NAMESPACE
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.namespace
+      - name: INSTANCE_IP
+        valueFrom:
+          fieldRef:
+            fieldPath: status.podIP
+      - name: SERVICE_ACCOUNT
+        valueFrom:
+          fieldRef:
+            fieldPath: spec.serviceAccountName
+      - name: HOST_IP
+        valueFrom:
+          fieldRef:
+            fieldPath: status.hostIP
+      - name: ISTIO_CPU_LIMIT
+        valueFrom:
+          resourceFieldRef:
+            resource: limits.cpu
+      - name: PROXY_CONFIG
+        value: |
+          {
+            "holdApplicationUntilProxyStarts": true
+          }
+      - name: ISTIO_META_POD_PORTS
+        value: "[]"
+      - name: ISTIO_META_APP_CONTAINERS
+        value: ""
+      - name: ISTIO_META_CLUSTER_ID
+        value: Kubernetes
+      - name: ISTIO_META_NODE_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: spec.nodeName
+      - name: ISTIO_META_INTERCEPTION_MODE
+        value: REDIRECT
+      - name: ISTIO_META_WORKLOAD_NAME
+        value: ""
+      - name: ISTIO_META_OWNER
+        value: ""
+      - name: ISTIO_META_MESH_ID
+        value: cluster.local
+      imagePullPolicy: IfNotPresent
+      readinessProbe:
+        httpGet:
+          path: /healthz/ready
+          port: 15021
+        initialDelaySeconds: 1
+        periodSeconds: 2
+        timeoutSeconds: 3
+        failureThreshold: 30
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+          - ALL
+        privileged: false
+        readOnlyRootFilesystem: true
+        runAsGroup: 1337
+        runAsNonRoot: true
+        runAsUser: 1337
+      volumeMounts:
+      - mountPath: /var/run/secrets/istio
+        name: istiod-ca-cert
+      - mountPath: /var/lib/istio/data
+        name: istio-data
+      - mountPath: /etc/istio/proxy
+        name: istio-envoy
+      - mountPath: /var/run/secrets/tokens
+        name: istio-token
+      - mountPath: /etc/istio/pod
+        name: istio-podinfo
+
+    volumes:
+    - emptyDir:
+        medium: Memory
+      name: istio-envoy
+    - emptyDir: {}
+      name: istio-data
+    - downwardAPI:
+        items:
+        - fieldRef:
+            fieldPath: metadata.labels
+          path: labels
+        - fieldRef:
+            fieldPath: metadata.annotations
+          path: annotations
+      name: istio-podinfo
+    - name: istio-token
+      projected:
+        sources:
+        - serviceAccountToken:
+            audience: istio-ca
+            expirationSeconds: 43200
+            path: istio-token
+    - configMap:
+        name: istio-ca-root-cert
+      name: istiod-ca-cert
+
+    initContainers:
+    - name: istio-init
+      image: auto
+      args:
+      - istio-iptables
+      - -p
+      - "15001"
+      - -z
+      - "15006"
+      - -u
+      - "1337"
+      - -m
+      - REDIRECT
+      - -i
+      - '*'
+      - -x
+      - ""
+      - -b
+      - '*'
+      - -d
+      - "15090,15021,15020"
+      imagePullPolicy: IfNotPresent
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          add:
+          - NET_ADMIN
+          - NET_RAW
+          drop:
+          - ALL
+        privileged: false
+        readOnlyRootFilesystem: false
+        runAsGroup: 0
+        runAsNonRoot: false
+        runAsUser: 0
+
+---
+# Pod annotations template for sidecar customization
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sidecar-annotations-guide
+  namespace: istio-system
+data:
+  README.md: |
+    # Istio Sidecar Injection Annotations
+
+    ## Control Injection
+    - `sidecar.istio.io/inject: "true"` - Force injection
+    - `sidecar.istio.io/inject: "false"` - Disable injection
+
+    ## Resource Configuration
+    - `sidecar.istio.io/proxyCPU: "100m"` - Set CPU request
+    - `sidecar.istio.io/proxyMemory: "128Mi"` - Set memory request
+    - `sidecar.istio.io/proxyCPULimit: "2000m"` - Set CPU limit
+    - `sidecar.istio.io/proxyMemoryLimit: "1024Mi"` - Set memory limit
+
+    ## Logging
+    - `sidecar.istio.io/logLevel: "info"` - Set log level
+    - `sidecar.istio.io/componentLogLevel: "misc:error"` - Component logging
+
+    ## Traffic Management
+    - `traffic.sidecar.istio.io/includeOutboundIPRanges: "*"` - Outbound IP ranges
+    - `traffic.sidecar.istio.io/excludeOutboundIPRanges: ""` - Exclude IPs
+    - `traffic.sidecar.istio.io/includeInboundPorts: "*"` - Inbound ports
+    - `traffic.sidecar.istio.io/excludeInboundPorts: ""` - Exclude ports
+
+    ## Proxy Configuration
+    - `proxy.istio.io/config: |` - Inline proxy configuration
+    - `sidecar.istio.io/statsInclusionPrefixes: ""` - Metrics prefixes
+    - `sidecar.istio.io/statsInclusionRegexps: ""` - Metrics regex
+
+    ## Examples
+
+    ### High-performance application
+    ```yaml
+    annotations:
+      sidecar.istio.io/proxyCPU: "500m"
+      sidecar.istio.io/proxyMemory: "512Mi"
+      sidecar.istio.io/proxyCPULimit: "4000m"
+      sidecar.istio.io/proxyMemoryLimit: "2048Mi"
+    ```
+
+    ### Debug mode
+    ```yaml
+    annotations:
+      sidecar.istio.io/logLevel: "debug"
+      sidecar.istio.io/componentLogLevel: "misc:debug"
+    ```
+
+    ### Custom traffic control
+    ```yaml
+    annotations:
+      traffic.sidecar.istio.io/excludeOutboundIPRanges: "10.0.0.0/8"
+      traffic.sidecar.istio.io/includeInboundPorts: "8080,8443"
+    ```
+
+---
+# Example Deployment with custom sidecar configuration
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: podinfo-custom-sidecar-example
+  namespace: podinfo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: podinfo-example
+  template:
+    metadata:
+      labels:
+        app: podinfo-example
+        version: v1
+      annotations:
+        # Sidecar resource configuration
+        sidecar.istio.io/proxyCPU: "200m"
+        sidecar.istio.io/proxyMemory: "256Mi"
+        sidecar.istio.io/proxyCPULimit: "2000m"
+        sidecar.istio.io/proxyMemoryLimit: "1024Mi"
+
+        # Logging configuration
+        sidecar.istio.io/logLevel: "warning"
+        sidecar.istio.io/componentLogLevel: "misc:error"
+
+        # Metrics configuration
+        sidecar.istio.io/statsInclusionPrefixes: "cluster_manager,listener_manager,http_mixer_filter,tcp_mixer_filter,server,cluster.xds-grpc"
+
+        # Application metrics
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9797"
+        prometheus.io/path: "/metrics"
+
+        # Custom proxy configuration
+        proxy.istio.io/config: |
+          holdApplicationUntilProxyStarts: true
+          concurrency: 2
+          drainDuration: 45s
+          terminationDrainDuration: 5s
+    spec:
+      serviceAccountName: podinfo
+      containers:
+      - name: podinfo
+        image: ghcr.io/stefanprodan/podinfo:6.9.2
+        ports:
+        - containerPort: 9898
+          name: http
+        - containerPort: 9797
+          name: http-metrics
+        - containerPort: 9999
+          name: grpc
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+
+---
+# Injection webhook configuration troubleshooting
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: injection-troubleshooting
+  namespace: istio-system
+data:
+  troubleshooting.md: |
+    # Sidecar Injection Troubleshooting
+
+    ## Check if injection is enabled
+    ```bash
+    kubectl get namespace -L istio-injection
+    ```
+
+    ## Manually inject sidecar (for testing)
+    ```bash
+    istioctl kube-inject -f deployment.yaml | kubectl apply -f -
+    ```
+
+    ## Check webhook configuration
+    ```bash
+    kubectl get mutatingwebhookconfigurations
+    kubectl describe mutatingwebhookconfiguration istio-sidecar-injector
+    ```
+
+    ## Verify injection occurred
+    ```bash
+    kubectl get pod <pod-name> -o jsonpath='{.spec.containers[*].name}'
+    # Should show: podinfo istio-proxy
+    ```
+
+    ## Check sidecar logs
+    ```bash
+    kubectl logs <pod-name> -c istio-proxy
+    ```
+
+    ## Force injection on specific pod
+    Add annotation: `sidecar.istio.io/inject: "true"`
+
+    ## Disable injection on specific pod
+    Add annotation: `sidecar.istio.io/inject: "false"`
+
+    ## Common Issues
+
+    1. Namespace not labeled
+       Solution: `kubectl label namespace <ns> istio-injection=enabled`
+
+    2. Webhook not ready
+       Solution: `kubectl get pods -n istio-system` (check istiod status)
+
+    3. Pod already running
+       Solution: Delete and recreate pod for injection to take effect
+
+    4. Resource constraints
+       Solution: Increase sidecar resource limits via annotations

@@ -1,0 +1,332 @@
+---
+# Vertical Pod Autoscaler Installation
+# Install via official repo:
+# git clone https://github.com/kubernetes/autoscaler.git
+# cd autoscaler/vertical-pod-autoscaler
+# ./hack/vpa-up.sh
+#
+# Or via Helm:
+# helm repo add fairwinds-stable https://charts.fairwinds.com/stable
+# helm install vpa fairwinds-stable/vpa --namespace vpa --create-namespace
+
+---
+# VPA for Podinfo Application (Recommendation Mode)
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: podinfo-vpa
+  namespace: default
+  labels:
+    app: podinfo
+    component: autoscaling
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: podinfo
+  updatePolicy:
+    updateMode: "Off"  # Only provide recommendations, don't apply
+  resourcePolicy:
+    containerPolicies:
+    - containerName: podinfo
+      minAllowed:
+        cpu: 100m
+        memory: 64Mi
+      maxAllowed:
+        cpu: 2
+        memory: 2Gi
+      controlledResources:
+      - cpu
+      - memory
+      controlledValues: RequestsAndLimits
+    - containerName: sidecar  # If exists
+      mode: "Auto"
+      minAllowed:
+        cpu: 50m
+        memory: 32Mi
+      maxAllowed:
+        cpu: 500m
+        memory: 512Mi
+
+---
+# VPA for Production Workloads (Auto Mode)
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: production-app-vpa
+  namespace: production
+  labels:
+    environment: production
+    component: autoscaling
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: production-app
+  updatePolicy:
+    updateMode: "Auto"  # Automatically apply recommendations
+    minReplicas: 2  # Ensure minimum replicas during updates
+  resourcePolicy:
+    containerPolicies:
+    - containerName: app
+      minAllowed:
+        cpu: 200m
+        memory: 256Mi
+      maxAllowed:
+        cpu: 4
+        memory: 8Gi
+      controlledResources:
+      - cpu
+      - memory
+      controlledValues: RequestsAndLimits
+      # Resource scaling rules
+      mode: "Auto"
+
+---
+# VPA for Stateful Workloads (Initial Mode)
+# Only sets resources on pod creation, doesn't update running pods
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: database-vpa
+  namespace: default
+  labels:
+    app: database
+    component: autoscaling
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: postgresql
+  updatePolicy:
+    updateMode: "Initial"  # Only set resources on pod creation
+  resourcePolicy:
+    containerPolicies:
+    - containerName: postgresql
+      minAllowed:
+        cpu: 500m
+        memory: 1Gi
+      maxAllowed:
+        cpu: 8
+        memory: 32Gi
+      controlledResources:
+      - cpu
+      - memory
+
+---
+# VPA for DaemonSets (Recreate Mode)
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: node-exporter-vpa
+  namespace: monitoring
+  labels:
+    app: node-exporter
+    component: autoscaling
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: DaemonSet
+    name: node-exporter
+  updatePolicy:
+    updateMode: "Recreate"  # Delete and recreate pods with new resources
+  resourcePolicy:
+    containerPolicies:
+    - containerName: node-exporter
+      minAllowed:
+        cpu: 50m
+        memory: 50Mi
+      maxAllowed:
+        cpu: 200m
+        memory: 200Mi
+      controlledResources:
+      - cpu
+      - memory
+      controlledValues: RequestsAndLimits
+
+---
+# VPA for Batch Jobs
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: batch-job-vpa
+  namespace: default
+  labels:
+    app: batch-processor
+    component: autoscaling
+spec:
+  targetRef:
+    apiVersion: batch/v1
+    kind: Job
+    name: data-processor
+  updatePolicy:
+    updateMode: "Initial"
+  resourcePolicy:
+    containerPolicies:
+    - containerName: processor
+      minAllowed:
+        cpu: 1
+        memory: 2Gi
+      maxAllowed:
+        cpu: 16
+        memory: 64Gi
+      controlledResources:
+      - cpu
+      - memory
+
+---
+# VPA for Cost-Optimized Workloads
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: cost-optimized-vpa
+  namespace: default
+  labels:
+    cost-profile: optimized
+    component: autoscaling
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: background-worker
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+    - containerName: worker
+      minAllowed:
+        cpu: 100m
+        memory: 128Mi
+      maxAllowed:
+        cpu: 1
+        memory: 1Gi
+      controlledResources:
+      - cpu
+      - memory
+      # Use lower recommendations for cost savings
+      mode: "Auto"
+
+---
+# VPA Recommender Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vpa-recommender-config
+  namespace: kube-system
+data:
+  recommender.yaml: |
+    # VPA Recommender configuration
+    pod-recommendation-min-cpu-millicores: 25
+    pod-recommendation-min-memory-mb: 50
+    target-cpu-percentile: 0.9
+    target-memory-percentile: 0.9
+    recommendation-margin-fraction: 0.15
+
+    # OOM protection
+    oom-min-bump-up-bytes: 104857600  # 100Mi
+    oom-bump-up-ratio: 1.2
+
+    # History length
+    history-length: 8d
+    history-resolution: 1h
+
+    # CPU recommendation boundaries
+    cpu-histogram-decay-half-life: 24h
+
+    # Memory recommendation boundaries
+    memory-histogram-decay-half-life: 24h
+
+---
+# VPA Admission Controller Webhook Configuration
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: vpa-webhook-config
+  labels:
+    app: vpa
+webhooks:
+- name: vpa.k8s.io
+  clientConfig:
+    service:
+      name: vpa-webhook
+      namespace: kube-system
+      path: "/webhook"
+    caBundle: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCi4uLgotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0t
+  rules:
+  - operations:
+    - CREATE
+    apiGroups:
+    - ""
+    apiVersions:
+    - v1
+    resources:
+    - pods
+  - operations:
+    - CREATE
+    - UPDATE
+    apiGroups:
+    - autoscaling.k8s.io
+    apiVersions:
+    - v1
+    - v1beta2
+    resources:
+    - verticalpodautoscalers
+  failurePolicy: Ignore
+  sideEffects: None
+  admissionReviewVersions:
+  - v1
+
+---
+# VPA Performance Monitoring
+apiVersion: v1
+kind: ServiceMonitor
+metadata:
+  name: vpa-metrics
+  namespace: kube-system
+  labels:
+    app: vpa
+spec:
+  selector:
+    matchLabels:
+      app: vpa
+  endpoints:
+  - port: metrics
+    interval: 30s
+    path: /metrics
+
+---
+# VPA RBAC for Recommendations Viewer
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vpa-recommendations-reader
+rules:
+- apiGroups:
+  - autoscaling.k8s.io
+  resources:
+  - verticalpodautoscalers
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vpa-recommendations-reader-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vpa-recommendations-reader
+subjects:
+- kind: ServiceAccount
+  name: developer
+  namespace: default

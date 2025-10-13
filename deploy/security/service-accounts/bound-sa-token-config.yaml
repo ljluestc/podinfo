@@ -1,0 +1,176 @@
+# Service Account Token Configuration
+# This configuration enables short-lived, bound service account tokens
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sa-token-config
+  namespace: kube-system
+data:
+  apiserver-sa-flags.conf: |
+    # Service Account Token Configuration for kube-apiserver
+    # Add these flags to kube-apiserver configuration
+
+    # Enable service account token projection
+    --service-account-issuer=https://kubernetes.default.svc.cluster.local
+    --service-account-key-file=/etc/kubernetes/pki/sa.pub
+    --service-account-signing-key-file=/etc/kubernetes/pki/sa.key
+
+    # API audiences for token validation
+    --api-audiences=https://kubernetes.default.svc.cluster.local,api
+
+    # Token max expiration (1 hour)
+    --service-account-max-token-expiration=3600s
+
+  instructions.md: |
+    # Service Account Token Management
+
+    ## Overview
+    This configuration enables BoundServiceAccountTokenVolume feature
+    which provides short-lived, automatically rotated service account tokens.
+
+    ## Features Enabled:
+    - Bound tokens (tied to specific pods)
+    - Time-limited tokens (default: 1 hour)
+    - Audience-bound tokens
+    - Automatic token rotation
+
+    ## Apply Configuration:
+
+    ### For kubeadm clusters:
+    Edit /etc/kubernetes/manifests/kube-apiserver.yaml and add the flags above.
+
+    ### For managed Kubernetes:
+    Most managed Kubernetes services (EKS, GKE, AKS) have this enabled by default
+    in recent versions. Check your provider documentation.
+
+    ## Migration from Legacy Tokens:
+
+    ```bash
+    # Find pods using legacy tokens
+    kubectl get pods --all-namespaces -o json | \
+      jq -r '.items[] | select(.spec.volumes[]?.secret?.secretName | strings | test("-token-")) | "\(.metadata.namespace)/\(.metadata.name)"'
+
+    # Update pod specifications to use projected tokens (see examples below)
+    ```
+---
+# Example: Pod using projected service account token
+apiVersion: v1
+kind: Pod
+metadata:
+  name: example-pod-with-projected-token
+  namespace: default
+spec:
+  serviceAccountName: default
+  containers:
+  - name: app
+    image: busybox:latest
+    command: ["sleep", "3600"]
+    volumeMounts:
+    - name: token
+      mountPath: /var/run/secrets/tokens
+      readOnly: true
+    env:
+    - name: TOKEN_PATH
+      value: /var/run/secrets/tokens/api-token
+  volumes:
+  - name: token
+    projected:
+      sources:
+      - serviceAccountToken:
+          path: api-token
+          expirationSeconds: 3600  # 1 hour
+          audience: api
+---
+# Example: Deployment with automatic token management
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-with-short-lived-tokens
+  namespace: default
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: secure-app
+  template:
+    metadata:
+      labels:
+        app: secure-app
+    spec:
+      serviceAccountName: app-service-account
+      # Automatically mount service account token
+      automountServiceAccountToken: true
+      containers:
+      - name: app
+        image: nginx:latest
+        volumeMounts:
+        - name: kube-api-token
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+          readOnly: true
+      volumes:
+      - name: kube-api-token
+        projected:
+          defaultMode: 420
+          sources:
+          - serviceAccountToken:
+              expirationSeconds: 3600  # 1 hour
+              path: token
+          - configMap:
+              items:
+              - key: ca.crt
+                path: ca.crt
+              name: kube-root-ca.crt
+          - downwardAPI:
+              items:
+              - fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.namespace
+                path: namespace
+---
+# Example: ServiceAccount with token automation disabled (for security)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: no-auto-token-sa
+  namespace: default
+automountServiceAccountToken: false  # Disable automatic token mounting
+---
+# Example: ServiceAccount with token automation enabled
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: app-service-account
+  namespace: default
+automountServiceAccountToken: true
+---
+# Policy: Enforce projected token usage via PodSecurityPolicy (deprecated) or OPA
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sa-token-policy
+  namespace: kube-system
+data:
+  policy.rego: |
+    package kubernetes.admission
+
+    # Deny pods that don't use projected service account tokens
+    deny[msg] {
+      input.request.kind.kind == "Pod"
+      not uses_projected_token
+      msg := "Pods must use projected service account tokens with expiration"
+    }
+
+    uses_projected_token {
+      some i
+      input.request.object.spec.volumes[i].projected.sources[_].serviceAccountToken.expirationSeconds
+    }
+
+    # Deny long-lived tokens (> 1 hour)
+    deny[msg] {
+      input.request.kind.kind == "Pod"
+      some i
+      token := input.request.object.spec.volumes[i].projected.sources[_].serviceAccountToken
+      token.expirationSeconds > 3600
+      msg := sprintf("Service account token expiration must be <= 3600 seconds, got %d", [token.expirationSeconds])
+    }
