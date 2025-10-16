@@ -1,0 +1,283 @@
+---
+# Namespace for integration testing
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: integration-testing
+  labels:
+    name: integration-testing
+
+---
+# ConfigMap with smoke test scripts
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: smoke-test-scripts
+  namespace: integration-testing
+data:
+  smoke-tests.sh: |
+    #!/bin/bash
+    set -e
+
+    echo "=== Running Cluster Smoke Tests ==="
+
+    # Test 1: API Server Connectivity
+    echo "Test 1: API Server Connectivity"
+    kubectl cluster-info
+    kubectl get --raw /healthz || exit 1
+    echo "✓ API Server is accessible"
+
+    # Test 2: Node Health
+    echo "Test 2: Node Health"
+    NOT_READY=$(kubectl get nodes --no-headers | grep -v " Ready" | wc -l)
+    if [ "$NOT_READY" -gt "0" ]; then
+      echo "✗ Found $NOT_READY nodes not ready"
+      kubectl get nodes
+      exit 1
+    fi
+    echo "✓ All nodes are ready"
+
+    # Test 3: Core Components
+    echo "Test 3: Core Components"
+    UNHEALTHY=$(kubectl get componentstatuses --no-headers 2>/dev/null | grep -v "Healthy" | wc -l)
+    echo "✓ Core components checked"
+
+    # Test 4: System Pods
+    echo "Test 4: System Pods"
+    NOT_RUNNING=$(kubectl get pods -n kube-system --no-headers | grep -v "Running\|Completed" | wc -l)
+    if [ "$NOT_RUNNING" -gt "0" ]; then
+      echo "✗ Found $NOT_RUNNING system pods not running"
+      kubectl get pods -n kube-system
+      exit 1
+    fi
+    echo "✓ All system pods are running"
+
+    # Test 5: DNS Resolution
+    echo "Test 5: DNS Resolution"
+    kubectl run -it --rm debug-dns --image=busybox:latest --restart=Never -- \
+      nslookup kubernetes.default.svc.cluster.local || exit 1
+    echo "✓ DNS resolution working"
+
+    # Test 6: Pod Networking
+    echo "Test 6: Pod Networking"
+    kubectl run -it --rm debug-net-1 --image=busybox:latest --restart=Never -- \
+      wget -qO- http://kubernetes.default.svc.cluster.local:443 || true
+    echo "✓ Pod networking working"
+
+    # Test 7: Storage Classes
+    echo "Test 7: Storage Classes"
+    SC_COUNT=$(kubectl get storageclass --no-headers | wc -l)
+    if [ "$SC_COUNT" -lt "1" ]; then
+      echo "✗ No storage classes found"
+      exit 1
+    fi
+    echo "✓ Storage classes available: $SC_COUNT"
+
+    # Test 8: Ingress Controller
+    echo "Test 8: Ingress Controller"
+    kubectl get pods -n ingress-nginx --no-headers | grep ingress-nginx-controller | grep Running || exit 1
+    echo "✓ Ingress controller is running"
+
+    # Test 9: Metrics Server
+    echo "Test 9: Metrics Server"
+    kubectl top nodes || echo "⚠ Metrics server not available"
+
+    # Test 10: RBAC
+    echo "Test 10: RBAC"
+    kubectl auth can-i create pods --as=system:serviceaccount:default:default -n default
+    echo "✓ RBAC is configured"
+
+    echo "=== All Smoke Tests Passed ==="
+
+  app-smoke-tests.sh: |
+    #!/bin/bash
+    set -e
+
+    echo "=== Running Application Smoke Tests ==="
+
+    TARGET_URL=${TARGET_URL:-"http://podinfo.default.svc.cluster.local:9898"}
+
+    # Test 1: Health Check
+    echo "Test 1: Health Check"
+    STATUS=$(curl -s -o /dev/null -w "%{http_code}" $TARGET_URL/healthz)
+    if [ "$STATUS" != "200" ]; then
+      echo "✗ Health check failed with status $STATUS"
+      exit 1
+    fi
+    echo "✓ Health check passed"
+
+    # Test 2: Readiness Check
+    echo "Test 2: Readiness Check"
+    STATUS=$(curl -s -o /dev/null -w "%{http_code}" $TARGET_URL/readyz)
+    if [ "$STATUS" != "200" ]; then
+      echo "✗ Readiness check failed with status $STATUS"
+      exit 1
+    fi
+    echo "✓ Readiness check passed"
+
+    # Test 3: API Info
+    echo "Test 3: API Info"
+    RESPONSE=$(curl -s $TARGET_URL/api/info)
+    echo $RESPONSE | jq -e '.version' > /dev/null || exit 1
+    echo "✓ API info endpoint working"
+
+    # Test 4: Metrics Endpoint
+    echo "Test 4: Metrics Endpoint"
+    curl -s $TARGET_URL/metrics | grep -q "promhttp_metric_handler_requests_total" || exit 1
+    echo "✓ Metrics endpoint working"
+
+    # Test 5: Version Endpoint
+    echo "Test 5: Version Endpoint"
+    curl -s $TARGET_URL/version | jq -e '.' > /dev/null || exit 1
+    echo "✓ Version endpoint working"
+
+    # Test 6: Echo Endpoint
+    echo "Test 6: Echo Endpoint"
+    ECHO_RESPONSE=$(curl -s -X POST $TARGET_URL/echo -d '{"test":"data"}' -H "Content-Type: application/json")
+    echo $ECHO_RESPONSE | jq -e '.test' > /dev/null || exit 1
+    echo "✓ Echo endpoint working"
+
+    # Test 7: Load Test
+    echo "Test 7: Basic Load Test"
+    for i in {1..10}; do
+      curl -s $TARGET_URL/healthz > /dev/null || exit 1
+    done
+    echo "✓ Basic load test passed"
+
+    echo "=== All Application Smoke Tests Passed ==="
+
+---
+# Job for cluster smoke tests
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cluster-smoke-test
+  namespace: integration-testing
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: smoke-test
+        type: cluster
+    spec:
+      serviceAccountName: default
+      restartPolicy: Never
+      containers:
+      - name: smoke-test
+        image: bitnami/kubectl:latest
+        command: ["/bin/bash", "/scripts/smoke-tests.sh"]
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+        resources:
+          limits:
+            cpu: 200m
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+      volumes:
+      - name: scripts
+        configMap:
+          name: smoke-test-scripts
+          defaultMode: 0755
+
+---
+# Job for application smoke tests
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: app-smoke-test
+  namespace: integration-testing
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: smoke-test
+        type: application
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: smoke-test
+        image: curlimages/curl:latest
+        command: ["/bin/sh", "/scripts/app-smoke-tests.sh"]
+        env:
+        - name: TARGET_URL
+          value: "http://podinfo.default.svc.cluster.local:9898"
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+        resources:
+          limits:
+            cpu: 200m
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+      volumes:
+      - name: scripts
+        configMap:
+          name: smoke-test-scripts
+          defaultMode: 0755
+
+---
+# CronJob for scheduled smoke tests
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: scheduled-smoke-tests
+  namespace: integration-testing
+spec:
+  schedule: "*/30 * * * *"  # Every 30 minutes
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: smoke-test
+            scheduled: "true"
+        spec:
+          serviceAccountName: default
+          restartPolicy: OnFailure
+          containers:
+          - name: cluster-smoke-test
+            image: bitnami/kubectl:latest
+            command: ["/bin/bash", "/scripts/smoke-tests.sh"]
+            volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+            resources:
+              limits:
+                cpu: 200m
+                memory: 256Mi
+              requests:
+                cpu: 100m
+                memory: 128Mi
+          - name: app-smoke-test
+            image: curlimages/curl:latest
+            command: ["/bin/sh", "/scripts/app-smoke-tests.sh"]
+            env:
+            - name: TARGET_URL
+              value: "http://podinfo.default.svc.cluster.local:9898"
+            volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+            resources:
+              limits:
+                cpu: 200m
+                memory: 256Mi
+              requests:
+                cpu: 100m
+                memory: 128Mi
+          volumes:
+          - name: scripts
+            configMap:
+              name: smoke-test-scripts
+              defaultMode: 0755

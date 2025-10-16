@@ -1,0 +1,325 @@
+---
+# Cost Alerts and Budget Enforcement
+# PrometheusRule for cost-related alerts
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: cost-alerts
+  namespace: opencost
+  labels:
+    app: opencost
+    prometheus: kube-prometheus-stack
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: cost.rules
+      interval: 5m
+      rules:
+        # High Cost Namespace Alert
+        - alert: NamespaceHighCost
+          expr: |
+            sum by (namespace) (
+              avg_over_time(node_cpu_hourly_cost[1h]) *
+              on (node) group_left() (
+                sum by (node) (rate(container_cpu_usage_seconds_total{container!=""}[1h]))
+              )
+            ) * 730 > 100
+          for: 1h
+          labels:
+            severity: warning
+            category: cost
+          annotations:
+            summary: "High monthly cost detected in namespace"
+            description: "Namespace {{ $labels.namespace }} is projected to cost ${{ $value | humanize }} per month based on current usage"
+            runbook_url: "https://wiki.example.com/runbooks/cost-optimization"
+
+        # Budget Threshold Warning (80%)
+        - alert: NamespaceBudgetWarning
+          expr: |
+            (
+              sum by (namespace) (
+                avg_over_time(node_cpu_hourly_cost[24h]) *
+                on (node) group_left() (
+                  sum by (node) (rate(container_cpu_usage_seconds_total{container!=""}[24h]))
+                )
+              ) * 730
+            ) /
+            (
+              kube_namespace_annotations{annotation_cost_allocation_monthly_budget!=""}
+              * 1
+            ) > 0.8
+          for: 30m
+          labels:
+            severity: warning
+            category: budget
+          annotations:
+            summary: "Namespace approaching budget limit"
+            description: "Namespace {{ $labels.namespace }} has used 80% of its monthly budget"
+
+        # Budget Exceeded Critical Alert
+        - alert: NamespaceBudgetExceeded
+          expr: |
+            (
+              sum by (namespace) (
+                avg_over_time(node_cpu_hourly_cost[24h]) *
+                on (node) group_left() (
+                  sum by (node) (rate(container_cpu_usage_seconds_total{container!=""}[24h]))
+                )
+              ) * 730
+            ) /
+            (
+              kube_namespace_annotations{annotation_cost_allocation_monthly_budget!=""}
+              * 1
+            ) > 1.0
+          for: 15m
+          labels:
+            severity: critical
+            category: budget
+          annotations:
+            summary: "Namespace exceeded budget limit"
+            description: "Namespace {{ $labels.namespace }} has exceeded its monthly budget. Immediate action required."
+            action_required: "Review and optimize resource usage or request budget increase"
+
+        # Idle Resource Cost Alert
+        - alert: HighIdleResourceCost
+          expr: |
+            (
+              sum by (namespace) (
+                container_memory_working_set_bytes{container!=""} / 1024 / 1024 / 1024
+              ) -
+              sum by (namespace) (
+                avg_over_time(container_memory_working_set_bytes{container!=""}[1h]) / 1024 / 1024 / 1024
+              )
+            ) > 5
+          for: 4h
+          labels:
+            severity: info
+            category: cost-optimization
+          annotations:
+            summary: "High idle resource allocation detected"
+            description: "Namespace {{ $labels.namespace }} has over 5GB of idle memory allocated for more than 4 hours"
+            recommendation: "Consider reducing resource requests or implementing right-sizing"
+
+        # Cluster Cost Spike Alert
+        - alert: ClusterCostSpike
+          expr: |
+            (
+              sum(avg_over_time(node_cpu_hourly_cost[1h])) * 730
+            ) /
+            (
+              sum(avg_over_time(node_cpu_hourly_cost[1h] offset 24h)) * 730
+            ) > 1.2
+          for: 2h
+          labels:
+            severity: warning
+            category: cost
+          annotations:
+            summary: "Cluster-wide cost spike detected"
+            description: "Cluster cost has increased by {{ $value | humanizePercentage }} compared to 24h ago"
+
+        # Expensive Pod Alert
+        - alert: ExpensivePodRunning
+          expr: |
+            sum by (namespace, pod) (
+              rate(container_cpu_usage_seconds_total{container!=""}[1h]) *
+              on (node) group_left() avg_over_time(node_cpu_hourly_cost[1h])
+            ) * 730 > 50
+          for: 3h
+          labels:
+            severity: info
+            category: cost-optimization
+          annotations:
+            summary: "Expensive pod detected"
+            description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} is costing ${{ $value | humanize }} per month"
+            recommendation: "Review pod resource usage and consider optimization"
+
+        # Storage Cost Alert
+        - alert: HighStorageCost
+          expr: |
+            sum by (namespace) (
+              kube_persistentvolumeclaim_resource_requests_storage_bytes / 1024 / 1024 / 1024
+            ) * 0.10 > 50
+          for: 6h
+          labels:
+            severity: warning
+            category: cost
+          annotations:
+            summary: "High storage costs detected"
+            description: "Namespace {{ $labels.namespace }} has ${{ $value | humanize }} in monthly storage costs"
+            recommendation: "Review PVC usage and implement retention policies"
+
+        # Unused PVC Cost Alert
+        - alert: UnusedPVCCost
+          expr: |
+            count by (namespace, persistentvolumeclaim) (
+              kube_persistentvolumeclaim_info
+              unless on (persistentvolumeclaim, namespace)
+              kube_pod_spec_volumes_persistentvolumeclaims_info
+            ) > 0
+          for: 24h
+          labels:
+            severity: info
+            category: cost-optimization
+          annotations:
+            summary: "Unused PVC detected"
+            description: "PVC {{ $labels.persistentvolumeclaim }} in namespace {{ $labels.namespace }} is not attached to any pod for over 24 hours"
+            action: "Consider deleting unused PVC to reduce costs"
+
+        # Over-provisioned Container Alert
+        - alert: ContainerOverProvisioned
+          expr: |
+            (
+              avg by (namespace, pod, container) (
+                rate(container_cpu_usage_seconds_total{container!=""}[1h])
+              ) /
+              avg by (namespace, pod, container) (
+                kube_pod_container_resource_requests{resource="cpu"}
+              )
+            ) < 0.2
+          for: 6h
+          labels:
+            severity: info
+            category: cost-optimization
+          annotations:
+            summary: "Container is significantly over-provisioned"
+            description: "Container {{ $labels.container }} in pod {{ $labels.pod }} is using less than 20% of requested CPU"
+            recommendation: "Reduce CPU requests to optimize costs"
+
+        # Memory Over-provisioned Alert
+        - alert: MemoryOverProvisioned
+          expr: |
+            (
+              avg by (namespace, pod, container) (
+                container_memory_working_set_bytes{container!=""}
+              ) /
+              avg by (namespace, pod, container) (
+                kube_pod_container_resource_requests{resource="memory"}
+              )
+            ) < 0.3
+          for: 6h
+          labels:
+            severity: info
+            category: cost-optimization
+          annotations:
+            summary: "Container memory is significantly over-provisioned"
+            description: "Container {{ $labels.container }} in pod {{ $labels.pod }} is using less than 30% of requested memory"
+            recommendation: "Reduce memory requests to optimize costs"
+
+---
+# AlertmanagerConfig for cost alerts routing
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: AlertmanagerConfig
+metadata:
+  name: cost-alerts-config
+  namespace: opencost
+  labels:
+    alertmanagerConfig: cost
+spec:
+  route:
+    groupBy: ['alertname', 'namespace']
+    groupWait: 30s
+    groupInterval: 5m
+    repeatInterval: 12h
+    receiver: 'cost-team'
+    routes:
+      # Critical budget alerts
+      - match:
+          severity: critical
+          category: budget
+        receiver: 'cost-team-critical'
+        repeatInterval: 1h
+
+      # Cost optimization recommendations
+      - match:
+          category: cost-optimization
+        receiver: 'cost-optimization-team'
+        repeatInterval: 24h
+
+  receivers:
+    # Main cost team receiver
+    - name: 'cost-team'
+      emailConfigs:
+        - to: 'cost-team@example.com'
+          from: 'alerts@example.com'
+          smarthost: 'smtp.example.com:587'
+          authUsername: 'alerts@example.com'
+          authPassword:
+            name: alertmanager-smtp-secret
+            key: password
+          headers:
+            - key: Subject
+              value: '[Cost Alert] {{ .GroupLabels.alertname }}'
+
+      slackConfigs:
+        - apiURL:
+            name: slack-webhook-secret
+            key: cost-alerts-url
+          channel: '#cost-alerts'
+          title: 'Cost Alert'
+          text: '{{ range .Alerts }}{{ .Annotations.description }}{{ end }}'
+
+    # Critical alerts receiver
+    - name: 'cost-team-critical'
+      emailConfigs:
+        - to: 'cost-team@example.com,management@example.com'
+          from: 'alerts@example.com'
+          smarthost: 'smtp.example.com:587'
+          authUsername: 'alerts@example.com'
+          authPassword:
+            name: alertmanager-smtp-secret
+            key: password
+          headers:
+            - key: Subject
+              value: '[CRITICAL] Budget Exceeded - {{ .GroupLabels.namespace }}'
+
+      pagerdutyConfigs:
+        - routingKey:
+            name: pagerduty-secret
+            key: routing-key
+          description: 'Critical Cost Alert: {{ .GroupLabels.alertname }}'
+
+    # Cost optimization team receiver
+    - name: 'cost-optimization-team'
+      emailConfigs:
+        - to: 'platform-team@example.com'
+          from: 'alerts@example.com'
+          smarthost: 'smtp.example.com:587'
+          authUsername: 'alerts@example.com'
+          authPassword:
+            name: alertmanager-smtp-secret
+            key: password
+          headers:
+            - key: Subject
+              value: '[Cost Optimization] Recommendations Available'
+
+---
+# Secret templates (to be filled with actual credentials)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: alertmanager-smtp-secret
+  namespace: opencost
+type: Opaque
+stringData:
+  password: "SMTP_PASSWORD_HERE"
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: slack-webhook-secret
+  namespace: opencost
+type: Opaque
+stringData:
+  cost-alerts-url: "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pagerduty-secret
+  namespace: opencost
+type: Opaque
+stringData:
+  routing-key: "PAGERDUTY_ROUTING_KEY_HERE"

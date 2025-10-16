@@ -1,0 +1,208 @@
+---
+# ConfigMap with E2E test scripts
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: e2e-test-scripts
+  namespace: integration-testing
+data:
+  e2e-tests.py: |
+    #!/usr/bin/env python3
+    import requests
+    import sys
+    import time
+    import os
+
+    BASE_URL = os.getenv('TARGET_URL', 'http://podinfo.default.svc.cluster.local:9898')
+
+    def test_health_endpoints():
+        """Test health and readiness endpoints"""
+        print("Test: Health and Readiness Endpoints")
+
+        health = requests.get(f"{BASE_URL}/healthz")
+        assert health.status_code == 200, f"Health check failed: {health.status_code}"
+
+        ready = requests.get(f"{BASE_URL}/readyz")
+        assert ready.status_code == 200, f"Readiness check failed: {ready.status_code}"
+
+        print("✓ Health endpoints working")
+
+    def test_api_endpoints():
+        """Test API endpoints"""
+        print("Test: API Endpoints")
+
+        # Test info endpoint
+        info = requests.get(f"{BASE_URL}/api/info")
+        assert info.status_code == 200, f"Info endpoint failed: {info.status_code}"
+        data = info.json()
+        assert 'version' in data, "Version not in info response"
+
+        # Test echo endpoint
+        echo_data = {"message": "test"}
+        echo = requests.post(f"{BASE_URL}/echo", json=echo_data)
+        assert echo.status_code == 200, f"Echo endpoint failed: {echo.status_code}"
+
+        print("✓ API endpoints working")
+
+    def test_metrics():
+        """Test metrics endpoint"""
+        print("Test: Metrics Endpoint")
+
+        metrics = requests.get(f"{BASE_URL}/metrics")
+        assert metrics.status_code == 200, f"Metrics failed: {metrics.status_code}"
+        assert 'promhttp_metric_handler_requests_total' in metrics.text
+
+        print("✓ Metrics endpoint working")
+
+    def test_performance():
+        """Test basic performance"""
+        print("Test: Basic Performance")
+
+        times = []
+        for i in range(10):
+            start = time.time()
+            response = requests.get(f"{BASE_URL}/healthz")
+            elapsed = time.time() - start
+            times.append(elapsed)
+            assert response.status_code == 200
+
+        avg_time = sum(times) / len(times)
+        print(f"  Average response time: {avg_time*1000:.2f}ms")
+        assert avg_time < 1.0, f"Average response time too high: {avg_time}s"
+
+        print("✓ Performance test passed")
+
+    def test_error_handling():
+        """Test error handling"""
+        print("Test: Error Handling")
+
+        # Test 404
+        response = requests.get(f"{BASE_URL}/nonexistent")
+        assert response.status_code == 404, "Expected 404 for nonexistent endpoint"
+
+        print("✓ Error handling working")
+
+    def run_all_tests():
+        """Run all E2E tests"""
+        print("=== Running E2E Tests ===\n")
+
+        tests = [
+            test_health_endpoints,
+            test_api_endpoints,
+            test_metrics,
+            test_performance,
+            test_error_handling
+        ]
+
+        failed = []
+        for test in tests:
+            try:
+                test()
+                print()
+            except Exception as e:
+                print(f"✗ Test failed: {e}\n")
+                failed.append(test.__name__)
+
+        if failed:
+            print(f"=== {len(failed)} tests failed ===")
+            for name in failed:
+                print(f"  - {name}")
+            sys.exit(1)
+        else:
+            print("=== All E2E Tests Passed ===")
+
+    if __name__ == "__main__":
+        run_all_tests()
+
+---
+# Job for E2E tests
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: e2e-test
+  namespace: integration-testing
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: e2e-test
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: e2e-test
+        image: python:3.11-slim
+        command:
+        - /bin/bash
+        - -c
+        - |
+          pip install requests
+          python3 /scripts/e2e-tests.py
+        env:
+        - name: TARGET_URL
+          value: "http://podinfo.default.svc.cluster.local:9898"
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 200m
+            memory: 256Mi
+      volumes:
+      - name: scripts
+        configMap:
+          name: e2e-test-scripts
+          defaultMode: 0755
+
+---
+# CronJob for scheduled E2E tests
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: scheduled-e2e-tests
+  namespace: integration-testing
+spec:
+  schedule: "0 */6 * * *"  # Every 6 hours
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: e2e-test
+            scheduled: "true"
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: e2e-test
+            image: python:3.11-slim
+            command:
+            - /bin/bash
+            - -c
+            - |
+              pip install requests
+              python3 /scripts/e2e-tests.py
+            env:
+            - name: TARGET_URL
+              value: "http://podinfo.default.svc.cluster.local:9898"
+            volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+            resources:
+              limits:
+                cpu: 500m
+                memory: 512Mi
+              requests:
+                cpu: 200m
+                memory: 256Mi
+          volumes:
+          - name: scripts
+            configMap:
+              name: e2e-test-scripts
+              defaultMode: 0755

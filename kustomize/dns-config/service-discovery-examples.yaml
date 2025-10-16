@@ -1,0 +1,206 @@
+---
+# Headless Service for StatefulSet DNS service discovery
+# This enables individual pod DNS records: <pod-name>.<service-name>.<namespace>.svc.cluster.local
+apiVersion: v1
+kind: Service
+metadata:
+  name: podinfo-headless
+  namespace: default
+  labels:
+    app: podinfo
+    service-type: headless
+  annotations:
+    service.alpha.kubernetes.io/tolerate-unready-endpoints: "true"
+spec:
+  clusterIP: None  # Headless service
+  publishNotReadyAddresses: true
+  ports:
+    - port: 9898
+      targetPort: http
+      protocol: TCP
+      name: http
+    - port: 9999
+      targetPort: grpc
+      protocol: TCP
+      name: grpc
+  selector:
+    app: podinfo
+---
+# Standard ClusterIP Service for load-balanced access
+# DNS: <service-name>.<namespace>.svc.cluster.local
+apiVersion: v1
+kind: Service
+metadata:
+  name: podinfo-internal
+  namespace: default
+  labels:
+    app: podinfo
+    service-type: clusterip
+  annotations:
+    # External DNS annotation for automatic DNS record creation
+    external-dns.alpha.kubernetes.io/hostname: podinfo.app.local
+    external-dns.alpha.kubernetes.io/ttl: "300"
+spec:
+  type: ClusterIP
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800
+  ports:
+    - port: 9898
+      targetPort: http
+      protocol: TCP
+      name: http
+    - port: 9999
+      targetPort: grpc
+      protocol: TCP
+      name: grpc
+  selector:
+    app: podinfo
+---
+# ExternalName Service for external service discovery
+# Maps Kubernetes DNS to external DNS name
+apiVersion: v1
+kind: Service
+metadata:
+  name: external-database
+  namespace: default
+  labels:
+    service-type: externalname
+spec:
+  type: ExternalName
+  externalName: database.external.com
+  ports:
+    - port: 5432
+      protocol: TCP
+      name: postgres
+---
+# Service with topology-aware routing for multi-zone deployments
+apiVersion: v1
+kind: Service
+metadata:
+  name: podinfo-topology-aware
+  namespace: default
+  labels:
+    app: podinfo
+    service-type: topology-aware
+  annotations:
+    external-dns.alpha.kubernetes.io/hostname: podinfo-ha.app.local
+spec:
+  type: ClusterIP
+  internalTrafficPolicy: Local
+  ports:
+    - port: 9898
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app: podinfo
+---
+# Endpoints for manual service discovery configuration
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: podinfo-manual-endpoints
+  namespace: default
+  labels:
+    app: podinfo
+    service-type: manual-endpoints
+subsets:
+  - addresses:
+      - ip: 10.0.0.10
+        hostname: pod-1
+      - ip: 10.0.0.11
+        hostname: pod-2
+    ports:
+      - port: 9898
+        protocol: TCP
+        name: http
+---
+# Service for the manual endpoints
+apiVersion: v1
+kind: Service
+metadata:
+  name: podinfo-manual-endpoints
+  namespace: default
+  labels:
+    app: podinfo
+    service-type: manual
+spec:
+  type: ClusterIP
+  ports:
+    - port: 9898
+      protocol: TCP
+      name: http
+  # No selector - uses manual Endpoints object above
+---
+# ConfigMap for service discovery examples and testing
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: service-discovery-examples
+  namespace: default
+  labels:
+    app: podinfo
+    component: service-discovery
+data:
+  # DNS patterns for service discovery
+  dns-patterns.txt: |
+    # Kubernetes DNS Service Discovery Patterns
+
+    ## Standard Service DNS
+    <service-name>.<namespace>.svc.cluster.local
+    Example: podinfo-internal.default.svc.cluster.local
+
+    ## Headless Service (individual pods)
+    <pod-name>.<service-name>.<namespace>.svc.cluster.local
+    Example: podinfo-0.podinfo-headless.default.svc.cluster.local
+
+    ## StatefulSet Pod DNS
+    <statefulset-name>-<ordinal>.<service-name>.<namespace>.svc.cluster.local
+    Example: web-0.nginx.default.svc.cluster.local
+
+    ## Service within same namespace
+    <service-name>
+    Example: podinfo-internal
+
+    ## Service in different namespace
+    <service-name>.<namespace>
+    Example: podinfo-internal.production
+
+    ## External DNS records (via External DNS)
+    <custom-hostname>
+    Example: podinfo.app.local
+
+    ## SRV Records for port discovery
+    _<port-name>._<protocol>.<service-name>.<namespace>.svc.cluster.local
+    Example: _http._tcp.podinfo-internal.default.svc.cluster.local
+
+  # Test script for DNS resolution
+  test-dns.sh: |
+    #!/bin/sh
+    echo "Testing Kubernetes DNS Service Discovery"
+    echo "========================================="
+
+    # Test standard service DNS
+    echo "\n1. Testing standard service DNS:"
+    nslookup podinfo-internal.default.svc.cluster.local
+
+    # Test headless service DNS
+    echo "\n2. Testing headless service DNS:"
+    nslookup podinfo-headless.default.svc.cluster.local
+
+    # Test short name resolution (same namespace)
+    echo "\n3. Testing short name resolution:"
+    nslookup podinfo-internal
+
+    # Test SRV record for port discovery
+    echo "\n4. Testing SRV record:"
+    nslookup -type=srv _http._tcp.podinfo-internal.default.svc.cluster.local
+
+    # Test external DNS
+    echo "\n5. Testing external DNS record:"
+    nslookup podinfo.app.local
+
+    echo "\n========================================="
+    echo "DNS tests completed"

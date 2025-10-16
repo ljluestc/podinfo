@@ -1,0 +1,343 @@
+---
+# CoreDNS ServiceMonitor for Prometheus scraping
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: coredns
+  namespace: kube-system
+  labels:
+    app: coredns
+    prometheus: kube-prometheus
+spec:
+  jobLabel: k8s-app
+  selector:
+    matchLabels:
+      k8s-app: kube-dns
+  namespaceSelector:
+    matchNames:
+      - kube-system
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+      scheme: http
+---
+# External DNS ServiceMonitor for Prometheus
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: external-dns
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: external-dns
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: external-dns
+  endpoints:
+    - port: http
+      interval: 30s
+      path: /metrics
+---
+# PrometheusRule for DNS monitoring alerts
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: dns-monitoring-rules
+  namespace: kube-system
+  labels:
+    prometheus: kube-prometheus
+    role: alert-rules
+spec:
+  groups:
+    - name: dns.rules
+      interval: 30s
+      rules:
+        # DNS query rate
+        - record: dns:queries:rate5m
+          expr: rate(coredns_dns_requests_total[5m])
+
+        # DNS error rate
+        - record: dns:errors:rate5m
+          expr: rate(coredns_dns_responses_total{rcode="SERVFAIL"}[5m])
+
+        # DNS cache hit ratio
+        - record: dns:cache_hit_ratio
+          expr: |
+            sum(rate(coredns_cache_hits_total[5m])) /
+            (sum(rate(coredns_cache_hits_total[5m])) + sum(rate(coredns_cache_misses_total[5m])))
+
+    - name: dns.alerts
+      interval: 30s
+      rules:
+        # Alert when DNS error rate is high
+        - alert: HighDNSErrorRate
+          expr: |
+            sum(rate(coredns_dns_responses_total{rcode="SERVFAIL"}[5m])) /
+            sum(rate(coredns_dns_responses_total[5m])) > 0.05
+          for: 5m
+          labels:
+            severity: warning
+            component: dns
+          annotations:
+            summary: "High DNS error rate detected"
+            description: "DNS error rate is {{ $value | humanizePercentage }} (threshold: 5%)"
+
+        # Alert when CoreDNS is down
+        - alert: CoreDNSDown
+          expr: up{job="kube-dns"} == 0
+          for: 5m
+          labels:
+            severity: critical
+            component: dns
+          annotations:
+            summary: "CoreDNS is down"
+            description: "CoreDNS has been down for more than 5 minutes"
+
+        # Alert when DNS query latency is high
+        - alert: HighDNSLatency
+          expr: |
+            histogram_quantile(0.99,
+              sum(rate(coredns_dns_request_duration_seconds_bucket[5m])) by (le)
+            ) > 1
+          for: 5m
+          labels:
+            severity: warning
+            component: dns
+          annotations:
+            summary: "High DNS query latency"
+            description: "99th percentile DNS latency is {{ $value }}s (threshold: 1s)"
+
+        # Alert when DNS cache hit ratio is low
+        - alert: LowDNSCacheHitRatio
+          expr: dns:cache_hit_ratio < 0.8
+          for: 15m
+          labels:
+            severity: info
+            component: dns
+          annotations:
+            summary: "Low DNS cache hit ratio"
+            description: "DNS cache hit ratio is {{ $value | humanizePercentage }} (threshold: 80%)"
+
+        # Alert when External DNS is failing to sync
+        - alert: ExternalDNSSyncFailure
+          expr: |
+            rate(external_dns_source_errors_total[5m]) > 0 or
+            rate(external_dns_registry_errors_total[5m]) > 0
+          for: 10m
+          labels:
+            severity: warning
+            component: external-dns
+          annotations:
+            summary: "External DNS sync failures detected"
+            description: "External DNS is experiencing sync failures"
+---
+# Deployment for DNS troubleshooting tools pod
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dns-debug-tools
+  namespace: kube-system
+  labels:
+    app: dns-debug-tools
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dns-debug-tools
+  template:
+    metadata:
+      labels:
+        app: dns-debug-tools
+    spec:
+      containers:
+        - name: dns-tools
+          image: nicolaka/netshoot:latest
+          command:
+            - sleep
+            - "infinity"
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "100m"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - NET_RAW  # For ping
+                - NET_ADMIN  # For network diagnostics
+---
+# ConfigMap with DNS troubleshooting scripts
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dns-troubleshooting-scripts
+  namespace: kube-system
+  labels:
+    app: dns-debug-tools
+data:
+  check-dns-health.sh: |
+    #!/bin/bash
+    # DNS Health Check Script
+
+    echo "==================================="
+    echo "DNS Health Check"
+    echo "==================================="
+    echo ""
+
+    # Check CoreDNS pods
+    echo "1. CoreDNS Pod Status:"
+    kubectl get pods -n kube-system -l k8s-app=kube-dns
+    echo ""
+
+    # Check CoreDNS service
+    echo "2. CoreDNS Service:"
+    kubectl get svc -n kube-system kube-dns
+    echo ""
+
+    # Check DNS resolution from within cluster
+    echo "3. Test DNS Resolution:"
+    kubectl run dns-test --image=busybox:1.28 --rm -it --restart=Never -- nslookup kubernetes.default
+    echo ""
+
+    # Check CoreDNS metrics
+    echo "4. CoreDNS Metrics (last 5m):"
+    kubectl exec -n kube-system deploy/coredns -- wget -qO- http://localhost:9153/metrics | grep -E "coredns_dns_request_count|coredns_dns_response_code"
+    echo ""
+
+    # Check CoreDNS logs for errors
+    echo "5. Recent CoreDNS Errors:"
+    kubectl logs -n kube-system -l k8s-app=kube-dns --tail=50 | grep -i error
+    echo ""
+
+    echo "==================================="
+    echo "Health check complete"
+    echo "==================================="
+
+  test-dns-resolution.sh: |
+    #!/bin/bash
+    # Comprehensive DNS Resolution Test
+
+    echo "==================================="
+    echo "DNS Resolution Tests"
+    echo "==================================="
+    echo ""
+
+    # Test internal service discovery
+    echo "1. Internal Service Discovery:"
+    for svc in kubernetes.default kube-dns.kube-system; do
+        echo "Testing: $svc"
+        nslookup $svc 2>&1 | head -5
+        echo ""
+    done
+
+    # Test external resolution
+    echo "2. External DNS Resolution:"
+    for domain in google.com github.com; do
+        echo "Testing: $domain"
+        nslookup $domain 2>&1 | head -5
+        echo ""
+    done
+
+    # Test SRV records
+    echo "3. SRV Record Queries:"
+    nslookup -type=srv _https._tcp.kubernetes.default.svc.cluster.local
+    echo ""
+
+    # Test reverse DNS
+    echo "4. Reverse DNS Lookup:"
+    KUBE_DNS_IP=$(kubectl get svc -n kube-system kube-dns -o jsonpath='{.spec.clusterIP}')
+    nslookup $KUBE_DNS_IP
+    echo ""
+
+    echo "==================================="
+    echo "Resolution tests complete"
+    echo "==================================="
+
+  analyze-dns-performance.sh: |
+    #!/bin/bash
+    # DNS Performance Analysis
+
+    echo "==================================="
+    echo "DNS Performance Analysis"
+    echo "==================================="
+    echo ""
+
+    # Query latency percentiles
+    echo "1. DNS Query Latency (from CoreDNS metrics):"
+    kubectl exec -n kube-system deploy/coredns -- wget -qO- http://localhost:9153/metrics | \
+      grep coredns_dns_request_duration_seconds | grep -v "^#"
+    echo ""
+
+    # Cache statistics
+    echo "2. DNS Cache Statistics:"
+    kubectl exec -n kube-system deploy/coredns -- wget -qO- http://localhost:9153/metrics | \
+      grep -E "coredns_cache_hits|coredns_cache_misses"
+    echo ""
+
+    # Request rate by type
+    echo "3. DNS Request Rate by Type:"
+    kubectl exec -n kube-system deploy/coredns -- wget -qO- http://localhost:9153/metrics | \
+      grep coredns_dns_requests_total | grep -v "^#"
+    echo ""
+
+    # Response codes distribution
+    echo "4. DNS Response Codes:"
+    kubectl exec -n kube-system deploy/coredns -- wget -qO- http://localhost:9153/metrics | \
+      grep coredns_dns_responses_total | grep -v "^#"
+    echo ""
+
+    echo "==================================="
+    echo "Performance analysis complete"
+    echo "==================================="
+
+  trace-dns-query.sh: |
+    #!/bin/bash
+    # Trace DNS query through the resolution chain
+
+    if [ -z "$1" ]; then
+        echo "Usage: $0 <domain-name>"
+        exit 1
+    fi
+
+    DOMAIN=$1
+
+    echo "==================================="
+    echo "Tracing DNS Query: $DOMAIN"
+    echo "==================================="
+    echo ""
+
+    # Get CoreDNS pod
+    COREDNS_POD=$(kubectl get pod -n kube-system -l k8s-app=kube-dns -o jsonpath='{.items[0].metadata.name}')
+
+    # Enable logging temporarily
+    echo "1. Current CoreDNS configuration:"
+    kubectl exec -n kube-system $COREDNS_POD -- cat /etc/coredns/Corefile
+    echo ""
+
+    # Perform query
+    echo "2. Performing DNS query..."
+    nslookup $DOMAIN
+    echo ""
+
+    # Check CoreDNS logs for this query
+    echo "3. CoreDNS logs for this query:"
+    kubectl logs -n kube-system $COREDNS_POD --tail=20 | grep -i $DOMAIN
+    echo ""
+
+    # Check if query was cached
+    echo "4. Cache status:"
+    kubectl exec -n kube-system deploy/coredns -- wget -qO- http://localhost:9153/metrics | \
+      grep coredns_cache_entries
+    echo ""
+
+    echo "==================================="
+    echo "Query trace complete"
+    echo "==================================="

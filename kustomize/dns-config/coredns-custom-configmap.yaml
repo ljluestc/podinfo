@@ -1,0 +1,117 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns-custom
+  namespace: kube-system
+  labels:
+    app: coredns
+    app.kubernetes.io/name: coredns
+    app.kubernetes.io/component: dns
+data:
+  # Custom CoreDNS configuration for additional functionality
+  # This ConfigMap is merged with the default CoreDNS configuration
+
+  # Custom zone configuration for internal services
+  custom.server: |
+    # Custom domain for application services
+    app.local:53 {
+        errors
+        cache 30
+        forward . 8.8.8.8 8.8.4.4
+        log
+    }
+
+    # Custom domain for database services
+    db.local:53 {
+        errors
+        cache 30
+        forward . 8.8.8.8 8.8.4.4
+        log
+    }
+
+  # Upstream resolver configuration
+  upstream.override: |
+    # Override upstream resolvers for better performance
+    .:53 {
+        errors
+        health {
+            lameduck 5s
+        }
+        ready
+
+        # Kubernetes service discovery
+        kubernetes cluster.local in-addr.arpa ip6.arpa {
+            pods insecure
+            fallthrough in-addr.arpa ip6.arpa
+            ttl 30
+        }
+
+        # Prometheus metrics
+        prometheus :9153
+
+        # Forward to external DNS with caching
+        forward . 8.8.8.8 8.8.4.4 1.1.1.1 {
+            max_concurrent 1000
+            policy random
+            health_check 5s
+        }
+
+        # DNS caching with longer TTL
+        cache {
+            success 9984 30
+            denial 9984 5
+            prefetch 10 60m 10%
+        }
+
+        # Load balancing
+        loadbalance round_robin
+
+        # Enable DNS loop detection
+        loop
+
+        # Reload configuration automatically
+        reload
+
+        # Response size limiting
+        bufsize 1232
+    }
+
+  # Logging configuration
+  log.override: |
+    log {
+        class error
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns-custom-zones
+  namespace: kube-system
+  labels:
+    app: coredns
+    app.kubernetes.io/name: coredns
+data:
+  # Custom zone files for specific domains
+  podinfo.zone: |
+    $ORIGIN podinfo.local.
+    $TTL 300
+    @       IN      SOA     ns.podinfo.local. admin.podinfo.local. (
+                            2025101301 ; Serial
+                            3600       ; Refresh
+                            1800       ; Retry
+                            604800     ; Expire
+                            300 )      ; Minimum TTL
+
+    @       IN      NS      ns.podinfo.local.
+    ns      IN      A       10.96.0.10
+
+    ; Application services
+    app     IN      A       10.96.0.100
+    api     IN      A       10.96.0.101
+    web     IN      A       10.96.0.102
+
+    ; Load balanced endpoints
+    lb      IN      A       10.96.0.100
+    lb      IN      A       10.96.0.101
+    lb      IN      A       10.96.0.102

@@ -1,0 +1,487 @@
+---
+# Maintenance Window Scheduler and Automation
+# Manages cluster maintenance windows with automated scheduling
+
+# ConfigMap for maintenance window configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: maintenance-windows-config
+  namespace: kube-system
+  labels:
+    app: maintenance-scheduler
+data:
+  config.yaml: |
+    # Maintenance window configuration
+    windows:
+      # Weekly maintenance window
+      - name: weekly-maintenance
+        schedule: "0 2 * * 0"  # Sunday at 2 AM
+        duration: 4h
+        enabled: true
+        notifications:
+          - slack
+          - email
+        pre_tasks:
+          - backup-etcd
+          - snapshot-state
+        post_tasks:
+          - verify-health
+          - send-report
+
+      # Monthly patching window
+      - name: monthly-patching
+        schedule: "0 1 1 * *"  # First day of month at 1 AM
+        duration: 8h
+        enabled: true
+        notifications:
+          - slack
+          - email
+          - pagerduty
+        pre_tasks:
+          - backup-etcd
+          - snapshot-state
+          - scale-down-non-critical
+        tasks:
+          - update-system-packages
+          - restart-nodes-rolling
+        post_tasks:
+          - scale-up-workloads
+          - verify-health
+          - send-report
+
+      # Emergency maintenance
+      - name: emergency-maintenance
+        schedule: manual
+        duration: 2h
+        enabled: true
+        notifications:
+          - slack
+          - pagerduty
+        pre_tasks:
+          - backup-etcd
+          - alert-oncall
+        post_tasks:
+          - verify-health
+
+    # Notification settings
+    notifications:
+      slack:
+        webhook_url_secret: slack-webhook
+        channel: "#ops-alerts"
+        pre_message: ":warning: Maintenance window starting in {{duration}}"
+        start_message: ":construction: Maintenance window started"
+        end_message: ":white_check_mark: Maintenance window completed"
+
+      email:
+        smtp_server: smtp.example.com
+        from: ops@example.com
+        to:
+          - ops-team@example.com
+          - management@example.com
+
+      pagerduty:
+        integration_key_secret: pagerduty-key
+
+    # Maintenance tasks
+    tasks:
+      backup-etcd:
+        script: /scripts/backup-etcd.sh
+        timeout: 300
+
+      snapshot-state:
+        script: /scripts/snapshot-cluster-state.sh
+        timeout: 600
+
+      scale-down-non-critical:
+        script: /scripts/scale-down-workloads.sh
+        args:
+          - --label=priority!=critical
+
+      update-system-packages:
+        script: /scripts/update-packages.sh
+        timeout: 3600
+
+      restart-nodes-rolling:
+        script: /scripts/rolling-node-restart.sh
+        timeout: 7200
+
+      scale-up-workloads:
+        script: /scripts/scale-up-workloads.sh
+        timeout: 600
+
+      verify-health:
+        script: /scripts/verify-cluster-health.sh
+        timeout: 300
+
+      send-report:
+        script: /scripts/send-maintenance-report.sh
+        timeout: 60
+
+---
+# ServiceAccount for maintenance scheduler
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: maintenance-scheduler
+  namespace: kube-system
+
+---
+# ClusterRole for maintenance operations
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: maintenance-operator
+rules:
+- apiGroups: [""]
+  resources: ["nodes", "pods", "services", "configmaps", "secrets"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "statefulsets", "daemonsets"]
+  verbs: ["get", "list", "watch", "update", "patch", "scale"]
+- apiGroups: ["batch"]
+  resources: ["jobs", "cronjobs"]
+  verbs: ["get", "list", "create", "delete"]
+- apiGroups: [""]
+  resources: ["pods/eviction"]
+  verbs: ["create"]
+
+---
+# ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: maintenance-scheduler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: maintenance-operator
+subjects:
+- kind: ServiceAccount
+  name: maintenance-scheduler
+  namespace: kube-system
+
+---
+# CronJob for weekly maintenance
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: weekly-maintenance
+  namespace: kube-system
+spec:
+  schedule: "0 2 * * 0"  # Sunday at 2 AM
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: maintenance-scheduler
+            window: weekly
+        spec:
+          serviceAccountName: maintenance-scheduler
+          restartPolicy: OnFailure
+          containers:
+          - name: maintenance
+            image: bitnami/kubectl:latest
+            volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+            - name: config
+              mountPath: /config
+            command:
+            - /bin/bash
+            - -c
+            - |
+              #!/bin/bash
+              set -e
+
+              source /scripts/common-functions.sh
+
+              log "===== Weekly Maintenance Window Started ====="
+
+              # Send start notification
+              notify_start "Weekly Maintenance"
+
+              # Pre-tasks
+              log "Running pre-tasks..."
+              run_task "backup-etcd"
+              run_task "snapshot-state"
+
+              # Maintenance tasks
+              log "Running maintenance tasks..."
+
+              # Clean up old resources
+              log "Cleaning up old jobs..."
+              kubectl delete jobs -n default --field-selector status.successful=1 \
+                --field-selector metadata.creationTimestamp<$(date -d '7 days ago' -Iseconds) || true
+
+              # Clean up completed pods
+              log "Cleaning up completed pods..."
+              kubectl delete pods -A --field-selector status.phase=Succeeded \
+                --field-selector metadata.creationTimestamp<$(date -d '2 days ago' -Iseconds) || true
+
+              kubectl delete pods -A --field-selector status.phase=Failed \
+                --field-selector metadata.creationTimestamp<$(date -d '2 days ago' -Iseconds) || true
+
+              # Restart monitoring components (rolling)
+              log "Restarting monitoring components..."
+              kubectl rollout restart deployment -n monitoring prometheus-operator || true
+              kubectl rollout restart deployment -n monitoring grafana || true
+
+              sleep 60
+
+              # Verify monitoring
+              kubectl wait --for=condition=available --timeout=300s \
+                deployment -n monitoring prometheus-operator || true
+              kubectl wait --for=condition=available --timeout=300s \
+                deployment -n monitoring grafana || true
+
+              # Post-tasks
+              log "Running post-tasks..."
+              run_task "verify-health"
+              run_task "send-report"
+
+              # Send completion notification
+              notify_complete "Weekly Maintenance"
+
+              log "===== Weekly Maintenance Window Completed ====="
+
+          volumes:
+          - name: scripts
+            configMap:
+              name: maintenance-scripts
+              defaultMode: 0755
+          - name: config
+            configMap:
+              name: maintenance-windows-config
+
+---
+# CronJob for monthly patching
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: monthly-patching
+  namespace: kube-system
+spec:
+  schedule: "0 1 1 * *"  # First day of month at 1 AM
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  suspend: false  # Set to true to disable
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app: maintenance-scheduler
+            window: monthly
+        spec:
+          serviceAccountName: maintenance-scheduler
+          restartPolicy: OnFailure
+          containers:
+          - name: patching
+            image: bitnami/kubectl:latest
+            volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+            command:
+            - /bin/bash
+            - -c
+            - |
+              #!/bin/bash
+              set -e
+
+              source /scripts/common-functions.sh
+
+              log "===== Monthly Patching Window Started ====="
+
+              notify_start "Monthly Patching"
+
+              # Pre-tasks
+              run_task "backup-etcd"
+              run_task "snapshot-state"
+
+              # Scale down non-critical workloads
+              log "Scaling down non-critical workloads..."
+              for ns in $(kubectl get ns -o jsonpath='{.items[*].metadata.name}'); do
+                kubectl scale deployment -n $ns --replicas=0 \
+                  -l priority=low,environment!=production || true
+              done
+
+              sleep 30
+
+              # Perform patching (placeholder - actual patching happens on nodes)
+              log "Patching window is active for 8 hours"
+              log "Perform node patches during this window"
+
+              # Generate patching report
+              log "Generating patching report..."
+              kubectl get nodes -o wide > /tmp/nodes-before.txt
+
+              # Post-tasks
+              log "Scaling up workloads..."
+              for ns in $(kubectl get ns -o jsonpath='{.items[*].metadata.name}'); do
+                kubectl scale deployment -n $ns --replicas=1 \
+                  -l priority=low,environment!=production || true
+              done
+
+              sleep 60
+
+              run_task "verify-health"
+              run_task "send-report"
+
+              notify_complete "Monthly Patching"
+
+              log "===== Monthly Patching Window Completed ====="
+
+          volumes:
+          - name: scripts
+            configMap:
+              name: maintenance-scripts
+              defaultMode: 0755
+
+---
+# ConfigMap with maintenance scripts
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: maintenance-scripts
+  namespace: kube-system
+data:
+  common-functions.sh: |
+    #!/bin/bash
+
+    LOG_FILE="/tmp/maintenance-$(date +%Y%m%d-%H%M%S).log"
+
+    log() {
+      echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
+    }
+
+    error() {
+      echo "[$(date +'%Y-%m-%d %H:%M:%S')] ERROR: $*" | tee -a "$LOG_FILE"
+    }
+
+    run_task() {
+      local task=$1
+      log "Running task: $task"
+
+      case $task in
+        backup-etcd)
+          bash /scripts/backup-etcd.sh
+          ;;
+        snapshot-state)
+          bash /scripts/snapshot-state.sh
+          ;;
+        verify-health)
+          bash /scripts/verify-health.sh
+          ;;
+        send-report)
+          bash /scripts/send-report.sh
+          ;;
+        *)
+          error "Unknown task: $task"
+          return 1
+          ;;
+      esac
+    }
+
+    notify_start() {
+      local window=$1
+      log "Sending start notification for: $window"
+      # Add Slack/email notification here
+    }
+
+    notify_complete() {
+      local window=$1
+      log "Sending completion notification for: $window"
+      # Add Slack/email notification here
+    }
+
+  backup-etcd.sh: |
+    #!/bin/bash
+    log "Backing up etcd..."
+
+    # Find etcd pod
+    ETCD_POD=$(kubectl get pods -n kube-system -l component=etcd -o jsonpath='{.items[0].metadata.name}')
+
+    if [ -z "$ETCD_POD" ]; then
+      error "Could not find etcd pod"
+      return 1
+    fi
+
+    # Create backup
+    kubectl exec -n kube-system "$ETCD_POD" -- sh -c \
+      "ETCDCTL_API=3 etcdctl \
+      --endpoints=https://127.0.0.1:2379 \
+      --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+      --cert=/etc/kubernetes/pki/etcd/server.crt \
+      --key=/etc/kubernetes/pki/etcd/server.key \
+      snapshot save /tmp/etcd-backup-$(date +%Y%m%d-%H%M%S).db"
+
+    log "etcd backup completed"
+
+  snapshot-state.sh: |
+    #!/bin/bash
+    log "Taking cluster state snapshot..."
+
+    kubectl get all -A > /tmp/cluster-state-$(date +%Y%m%d-%H%M%S).txt
+    kubectl get nodes -o wide >> /tmp/cluster-state-$(date +%Y%m%d-%H%M%S).txt
+
+    log "Cluster state snapshot completed"
+
+  verify-health.sh: |
+    #!/bin/bash
+    log "Verifying cluster health..."
+
+    # Check nodes
+    NOT_READY=$(kubectl get nodes | grep -v "Ready" | grep -v "NAME" | wc -l)
+    if [ $NOT_READY -gt 0 ]; then
+      error "$NOT_READY nodes are not ready"
+    fi
+
+    # Check system pods
+    NOT_RUNNING=$(kubectl get pods -n kube-system | grep -v "Running\|Completed" | grep -v "NAME" | wc -l)
+    if [ $NOT_RUNNING -gt 0 ]; then
+      error "$NOT_RUNNING system pods are not running"
+    fi
+
+    # Check API server
+    if ! kubectl get --raw /healthz; then
+      error "API server health check failed"
+    fi
+
+    log "Cluster health verification completed"
+
+  send-report.sh: |
+    #!/bin/bash
+    log "Sending maintenance report..."
+
+    # Generate report
+    REPORT="/tmp/maintenance-report-$(date +%Y%m%d-%H%M%S).txt"
+
+    cat > $REPORT <<EOF
+    Kubernetes Maintenance Report
+    Generated: $(date)
+
+    Cluster Status:
+    $(kubectl get nodes)
+
+    System Pods:
+    $(kubectl get pods -n kube-system)
+
+    Recent Events:
+    $(kubectl get events -A --sort-by='.lastTimestamp' | tail -20)
+
+    Logs:
+    $(cat $LOG_FILE)
+    EOF
+
+    log "Report saved to: $REPORT"
+    # Add logic to send via email/Slack
+
+    log "Maintenance report sent"

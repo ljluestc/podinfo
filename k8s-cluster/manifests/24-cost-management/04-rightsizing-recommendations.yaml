@@ -1,0 +1,398 @@
+---
+# Resource Right-sizing Recommendations
+# CronJob that analyzes resource usage and generates right-sizing recommendations
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rightsizing-analyzer
+  namespace: opencost
+  labels:
+    app: rightsizing
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rightsizing-analyzer
+  labels:
+    app: rightsizing
+rules:
+  - apiGroups: [""]
+    resources:
+      - pods
+      - nodes
+      - namespaces
+    verbs:
+      - get
+      - list
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - statefulsets
+      - daemonsets
+    verbs:
+      - get
+      - list
+  - apiGroups: ["metrics.k8s.io"]
+    resources:
+      - pods
+      - nodes
+    verbs:
+      - get
+      - list
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: rightsizing-analyzer
+  labels:
+    app: rightsizing
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: rightsizing-analyzer
+subjects:
+  - kind: ServiceAccount
+    name: rightsizing-analyzer
+    namespace: opencost
+
+---
+# ConfigMap with right-sizing configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rightsizing-config
+  namespace: opencost
+  labels:
+    app: rightsizing
+data:
+  config.yaml: |
+    # Right-sizing configuration
+    analysis:
+      # Historical data window for analysis
+      lookback_days: 7
+
+      # Confidence levels
+      min_samples: 100  # Minimum data points required
+      confidence_level: 0.95  # Statistical confidence
+
+      # Resource thresholds
+      cpu:
+        # Recommend change if usage differs by more than threshold
+        change_threshold: 0.2  # 20%
+        # Buffer to add above peak usage
+        headroom_factor: 1.3  # 30% buffer
+        # Minimum CPU request
+        min_request: "10m"
+
+      memory:
+        change_threshold: 0.2  # 20%
+        headroom_factor: 1.2  # 20% buffer
+        min_request: "32Mi"
+
+      # Usage percentiles for recommendations
+      percentiles:
+        p50: 0.50  # Median
+        p95: 0.95  # 95th percentile (recommended)
+        p99: 0.99  # 99th percentile (conservative)
+
+    # Recommendation categories
+    categories:
+      over_provisioned:
+        threshold: 0.3  # Using less than 30% of requests
+        severity: high
+        action: decrease
+
+      under_provisioned:
+        threshold: 0.9  # Using more than 90% of limits
+        severity: critical
+        action: increase
+
+      optimized:
+        range: [0.4, 0.8]  # Using 40-80% is considered optimal
+        action: none
+
+    # Cost impact calculation
+    cost_savings:
+      # Calculate potential monthly savings
+      enabled: true
+      # Minimum savings to report ($)
+      min_monthly_savings: 5
+
+  rightsizing-script.py: |
+    #!/usr/bin/env python3
+    """
+    Right-sizing recommendation generator
+    Analyzes Prometheus metrics and generates resource optimization recommendations
+    """
+    import requests
+    import json
+    from datetime import datetime, timedelta
+    import os
+
+    PROMETHEUS_URL = os.getenv("PROMETHEUS_URL", "http://kube-prometheus-stack-prometheus.monitoring.svc:9090")
+    LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "7"))
+
+    def query_prometheus(query):
+        """Query Prometheus and return results"""
+        response = requests.get(
+            f"{PROMETHEUS_URL}/api/v1/query",
+            params={"query": query}
+        )
+        return response.json()
+
+    def get_resource_usage():
+        """Get CPU and memory usage for all containers"""
+        queries = {
+            "cpu_usage": """
+                avg_over_time(
+                  rate(container_cpu_usage_seconds_total{container!=""}[5m])
+                [{days}d])
+            """.format(days=LOOKBACK_DAYS),
+            "cpu_request": """
+                avg(kube_pod_container_resource_requests{resource="cpu"})
+                by (namespace, pod, container)
+            """,
+            "memory_usage": """
+                avg_over_time(
+                  container_memory_working_set_bytes{container!=""}
+                [{days}d])
+            """.format(days=LOOKBACK_DAYS),
+            "memory_request": """
+                avg(kube_pod_container_resource_requests{resource="memory"})
+                by (namespace, pod, container)
+            """
+        }
+
+        results = {}
+        for name, query in queries.items():
+            results[name] = query_prometheus(query)
+
+        return results
+
+    def generate_recommendations(usage_data):
+        """Generate right-sizing recommendations"""
+        recommendations = []
+
+        # Process CPU recommendations
+        # ... implementation details ...
+
+        return recommendations
+
+    def calculate_cost_savings(current, recommended, cost_per_core=0.031611):
+        """Calculate potential cost savings"""
+        current_cores = current / 1000  # millicores to cores
+        recommended_cores = recommended / 1000
+        monthly_savings = (current_cores - recommended_cores) * cost_per_core * 730
+        return max(0, monthly_savings)
+
+    def main():
+        print(f"Starting right-sizing analysis for past {LOOKBACK_DAYS} days...")
+
+        usage_data = get_resource_usage()
+        recommendations = generate_recommendations(usage_data)
+
+        # Output recommendations as JSON
+        output = {
+            "timestamp": datetime.now().isoformat(),
+            "lookback_days": LOOKBACK_DAYS,
+            "recommendations": recommendations,
+            "total_potential_savings": sum(r.get("monthly_savings", 0) for r in recommendations)
+        }
+
+        print(json.dumps(output, indent=2))
+
+        # Save to file for dashboard consumption
+        with open("/tmp/rightsizing-recommendations.json", "w") as f:
+            json.dump(output, f, indent=2)
+
+        print(f"Generated {len(recommendations)} recommendations")
+        print(f"Potential monthly savings: ${output['total_potential_savings']:.2f}")
+
+    if __name__ == "__main__":
+        main()
+
+---
+# CronJob to run right-sizing analysis daily
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: rightsizing-analyzer
+  namespace: opencost
+  labels:
+    app: rightsizing
+spec:
+  # Run daily at 2 AM
+  schedule: "0 2 * * *"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: rightsizing
+        spec:
+          serviceAccountName: rightsizing-analyzer
+          restartPolicy: OnFailure
+          containers:
+            - name: analyzer
+              image: python:3.11-alpine
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  pip install requests prometheus-api-client numpy pandas
+                  python3 /scripts/rightsizing-script.py
+              env:
+                - name: PROMETHEUS_URL
+                  value: "http://kube-prometheus-stack-prometheus.monitoring.svc:9090"
+                - name: LOOKBACK_DAYS
+                  value: "7"
+              resources:
+                requests:
+                  cpu: "100m"
+                  memory: "256Mi"
+                limits:
+                  cpu: "500m"
+                  memory: "512Mi"
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                - name: output
+                  mountPath: /tmp
+          volumes:
+            - name: scripts
+              configMap:
+                name: rightsizing-config
+                items:
+                  - key: rightsizing-script.py
+                    path: rightsizing-script.py
+                    mode: 0755
+            - name: output
+              emptyDir: {}
+
+---
+# VPA (Vertical Pod Autoscaler) Configuration for automated right-sizing
+# Requires VPA to be installed in the cluster
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: vpa-recommender-example
+  namespace: default
+  labels:
+    purpose: cost-optimization
+  annotations:
+    description: "Example VPA for right-sizing recommendations"
+spec:
+  targetRef:
+    apiVersion: "apps/v1"
+    kind: Deployment
+    name: podinfo
+  updatePolicy:
+    updateMode: "Off"  # Only recommend, don't auto-apply
+  resourcePolicy:
+    containerPolicies:
+      - containerName: "*"
+        minAllowed:
+          cpu: 10m
+          memory: 32Mi
+        maxAllowed:
+          cpu: 2
+          memory: 4Gi
+        controlledResources: ["cpu", "memory"]
+
+---
+# ConfigMap for VPA recommendations dashboard
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vpa-exporter
+  namespace: opencost
+  labels:
+    app: vpa-exporter
+data:
+  vpa-exporter.sh: |
+    #!/bin/bash
+    # Export VPA recommendations as Prometheus metrics
+    # This allows visualization in Grafana
+
+    set -e
+
+    # Get all VPA objects
+    kubectl get vpa --all-namespaces -o json | \
+    jq -r '.items[] |
+      select(.status.recommendation != null) |
+      {
+        namespace: .metadata.namespace,
+        name: .metadata.name,
+        target: .spec.targetRef.name,
+        cpu_request: .status.recommendation.containerRecommendations[0].target.cpu,
+        memory_request: .status.recommendation.containerRecommendations[0].target.memory,
+        cpu_lower: .status.recommendation.containerRecommendations[0].lowerBound.cpu,
+        cpu_upper: .status.recommendation.containerRecommendations[0].upperBound.cpu,
+        memory_lower: .status.recommendation.containerRecommendations[0].lowerBound.memory,
+        memory_upper: .status.recommendation.containerRecommendations[0].upperBound.memory
+      } |
+      "vpa_cpu_recommendation{namespace=\"\(.namespace)\",vpa=\"\(.name)\",target=\"\(.target)\"} \(.cpu_request)\n" +
+      "vpa_memory_recommendation{namespace=\"\(.namespace)\",vpa=\"\(.name)\",target=\"\(.target)\"} \(.memory_request)"
+    '
+
+---
+# Job to manually trigger right-sizing analysis
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rightsizing-analysis-manual
+  namespace: opencost
+  labels:
+    app: rightsizing
+    trigger: manual
+  annotations:
+    description: "Manual trigger for right-sizing analysis"
+spec:
+  ttlSecondsAfterFinished: 3600  # Clean up after 1 hour
+  template:
+    metadata:
+      labels:
+        app: rightsizing
+    spec:
+      serviceAccountName: rightsizing-analyzer
+      restartPolicy: Never
+      containers:
+        - name: analyzer
+          image: python:3.11-alpine
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Installing dependencies..."
+              pip install requests prometheus-api-client numpy pandas > /dev/null 2>&1
+              echo "Running right-sizing analysis..."
+              python3 /scripts/rightsizing-script.py
+          env:
+            - name: PROMETHEUS_URL
+              value: "http://kube-prometheus-stack-prometheus.monitoring.svc:9090"
+            - name: LOOKBACK_DAYS
+              value: "7"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+      volumes:
+        - name: scripts
+          configMap:
+            name: rightsizing-config
+            items:
+              - key: rightsizing-script.py
+                path: rightsizing-script.py
+                mode: 0755

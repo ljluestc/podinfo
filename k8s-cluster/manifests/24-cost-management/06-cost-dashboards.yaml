@@ -1,0 +1,503 @@
+---
+# Cost Management Dashboards for Grafana
+# Comprehensive visualization of cluster costs
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cost-dashboards
+  namespace: opencost
+  labels:
+    grafana_dashboard: "1"
+    app: cost-management
+data:
+  # Main Cost Overview Dashboard
+  cost-overview.json: |
+    {
+      "dashboard": {
+        "title": "Cost Management - Overview",
+        "tags": ["cost", "opencost"],
+        "timezone": "browser",
+        "schemaVersion": 16,
+        "version": 1,
+        "refresh": "5m",
+        "panels": [
+          {
+            "id": 1,
+            "title": "Total Monthly Cluster Cost",
+            "type": "stat",
+            "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+            "targets": [{
+              "expr": "sum(avg_over_time(node_cpu_hourly_cost[24h])) * 730",
+              "legendFormat": "Total Cost"
+            }],
+            "fieldConfig": {
+              "defaults": {
+                "unit": "currencyUSD",
+                "decimals": 2,
+                "thresholds": {
+                  "mode": "absolute",
+                  "steps": [
+                    {"value": 0, "color": "green"},
+                    {"value": 1000, "color": "yellow"},
+                    {"value": 5000, "color": "red"}
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "id": 2,
+            "title": "Cost by Namespace (Monthly)",
+            "type": "piechart",
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+            "targets": [{
+              "expr": "sum by (namespace) (avg_over_time(node_cpu_hourly_cost[24h]) * on (node) group_left() sum by (node) (rate(container_cpu_usage_seconds_total{container!=\"\"}[24h]))) * 730",
+              "legendFormat": "{{ namespace }}"
+            }],
+            "options": {
+              "legend": {"displayMode": "table", "placement": "right"},
+              "pieType": "donut"
+            }
+          },
+          {
+            "id": 3,
+            "title": "Cost Trend (Last 7 Days)",
+            "type": "graph",
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+            "targets": [{
+              "expr": "sum(avg_over_time(node_cpu_hourly_cost[1h])) * 730",
+              "legendFormat": "Daily Cost"
+            }],
+            "yaxes": [{
+              "format": "currencyUSD",
+              "label": "Cost per Day"
+            }]
+          },
+          {
+            "id": 4,
+            "title": "Top 10 Most Expensive Namespaces",
+            "type": "table",
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+            "targets": [{
+              "expr": "topk(10, sum by (namespace) (avg_over_time(node_cpu_hourly_cost[24h]) * on (node) group_left() sum by (node) (rate(container_cpu_usage_seconds_total{container!=\"\"}[24h]))) * 730)",
+              "format": "table",
+              "instant": true
+            }],
+            "transformations": [{
+              "id": "organize",
+              "options": {
+                "excludeByName": {},
+                "indexByName": {},
+                "renameByName": {
+                  "namespace": "Namespace",
+                  "Value": "Monthly Cost"
+                }
+              }
+            }]
+          },
+          {
+            "id": 5,
+            "title": "Cost by Resource Type",
+            "type": "bargauge",
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+            "targets": [
+              {
+                "expr": "sum(avg_over_time(node_cpu_hourly_cost[24h])) * 730",
+                "legendFormat": "CPU"
+              },
+              {
+                "expr": "sum(kube_persistentvolumeclaim_resource_requests_storage_bytes / 1024 / 1024 / 1024) * 0.10",
+                "legendFormat": "Storage"
+              },
+              {
+                "expr": "sum(avg_over_time(node_memory_hourly_cost[24h])) * 730",
+                "legendFormat": "Memory"
+              }
+            ],
+            "options": {
+              "orientation": "horizontal",
+              "displayMode": "gradient"
+            }
+          },
+          {
+            "id": 6,
+            "title": "Budget vs Actual (By Namespace)",
+            "type": "graph",
+            "gridPos": {"h": 8, "w": 24, "x": 0, "y": 20},
+            "targets": [
+              {
+                "expr": "sum by (namespace) (avg_over_time(node_cpu_hourly_cost[24h]) * on (node) group_left() sum by (node) (rate(container_cpu_usage_seconds_total{container!=\"\"}[24h]))) * 730",
+                "legendFormat": "Actual - {{ namespace }}"
+              },
+              {
+                "expr": "kube_namespace_annotations{annotation_cost_allocation_monthly_budget!=\"\"} * 1",
+                "legendFormat": "Budget - {{ namespace }}"
+              }
+            ],
+            "seriesOverrides": [
+              {
+                "alias": "/^Budget.*/",
+                "dashes": true,
+                "linewidth": 2
+              }
+            ]
+          }
+        ]
+      }
+    }
+
+  # Cost Allocation Dashboard
+  cost-allocation.json: |
+    {
+      "dashboard": {
+        "title": "Cost Management - Allocation",
+        "tags": ["cost", "allocation", "chargeback"],
+        "timezone": "browser",
+        "schemaVersion": 16,
+        "version": 1,
+        "refresh": "5m",
+        "panels": [
+          {
+            "id": 1,
+            "title": "Cost by Team",
+            "type": "piechart",
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+            "targets": [{
+              "expr": "sum by (label_team) (avg_over_time(node_cpu_hourly_cost[24h]) * on (node) group_left() sum by (node, label_team) (rate(container_cpu_usage_seconds_total{container!=\"\"}[24h]))) * 730",
+              "legendFormat": "{{ label_team }}"
+            }]
+          },
+          {
+            "id": 2,
+            "title": "Cost by Application",
+            "type": "bargauge",
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+            "targets": [{
+              "expr": "topk(10, sum by (label_application) (avg_over_time(node_cpu_hourly_cost[24h]) * on (node) group_left() sum by (node, label_application) (rate(container_cpu_usage_seconds_total{container!=\"\"}[24h]))) * 730)",
+              "legendFormat": "{{ label_application }}"
+            }]
+          },
+          {
+            "id": 3,
+            "title": "Cost by Environment",
+            "type": "table",
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+            "targets": [{
+              "expr": "sum by (label_environment) (avg_over_time(node_cpu_hourly_cost[24h]) * on (node) group_left() sum by (node, label_environment) (rate(container_cpu_usage_seconds_total{container!=\"\"}[24h]))) * 730",
+              "format": "table",
+              "instant": true
+            }]
+          },
+          {
+            "id": 4,
+            "title": "Cost by Cost Center",
+            "type": "table",
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+            "targets": [{
+              "expr": "sum by (label_cost_center) (avg_over_time(node_cpu_hourly_cost[24h]) * on (node) group_left() sum by (node, label_cost_center) (rate(container_cpu_usage_seconds_total{container!=\"\"}[24h]))) * 730",
+              "format": "table",
+              "instant": true
+            }]
+          },
+          {
+            "id": 5,
+            "title": "Showback Report - Team Monthly Costs",
+            "type": "table",
+            "gridPos": {"h": 10, "w": 24, "x": 0, "y": 16},
+            "targets": [{
+              "expr": "sum by (label_team, namespace) (avg_over_time(node_cpu_hourly_cost[24h]) * on (node) group_left() sum by (node, label_team, namespace) (rate(container_cpu_usage_seconds_total{container!=\"\"}[24h]))) * 730",
+              "format": "table",
+              "instant": true
+            }],
+            "transformations": [{
+              "id": "organize",
+              "options": {
+                "renameByName": {
+                  "label_team": "Team",
+                  "namespace": "Namespace",
+                  "Value": "Monthly Cost ($)"
+                }
+              }
+            }]
+          }
+        ]
+      }
+    }
+
+  # Cost Optimization Dashboard
+  cost-optimization.json: |
+    {
+      "dashboard": {
+        "title": "Cost Management - Optimization",
+        "tags": ["cost", "optimization", "savings"],
+        "timezone": "browser",
+        "schemaVersion": 16,
+        "version": 1,
+        "refresh": "5m",
+        "panels": [
+          {
+            "id": 1,
+            "title": "Potential Monthly Savings",
+            "type": "stat",
+            "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+            "targets": [{
+              "expr": "sum(opencost_potential_savings_monthly)",
+              "legendFormat": "Savings"
+            }],
+            "fieldConfig": {
+              "defaults": {
+                "unit": "currencyUSD",
+                "decimals": 2,
+                "color": {"mode": "thresholds"},
+                "thresholds": {
+                  "steps": [
+                    {"value": 0, "color": "red"},
+                    {"value": 100, "color": "yellow"},
+                    {"value": 500, "color": "green"}
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "id": 2,
+            "title": "Idle Resource Cost",
+            "type": "stat",
+            "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+            "targets": [{
+              "expr": "sum(container_memory_working_set_bytes{container!=\"\"} - avg_over_time(container_memory_working_set_bytes{container!=\"\"}[1h])) / 1024 / 1024 / 1024 * 0.004",
+              "legendFormat": "Idle Cost"
+            }],
+            "fieldConfig": {
+              "defaults": {"unit": "currencyUSD", "decimals": 2}
+            }
+          },
+          {
+            "id": 3,
+            "title": "Over-Provisioned Containers (CPU)",
+            "type": "table",
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+            "targets": [{
+              "expr": "avg by (namespace, pod, container) (rate(container_cpu_usage_seconds_total{container!=\"\"}[1h])) / avg by (namespace, pod, container) (kube_pod_container_resource_requests{resource=\"cpu\"}) < 0.2",
+              "format": "table",
+              "instant": true
+            }],
+            "transformations": [{
+              "id": "organize",
+              "options": {
+                "renameByName": {
+                  "namespace": "Namespace",
+                  "pod": "Pod",
+                  "container": "Container",
+                  "Value": "CPU Utilization %"
+                }
+              }
+            }]
+          },
+          {
+            "id": 4,
+            "title": "Over-Provisioned Containers (Memory)",
+            "type": "table",
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+            "targets": [{
+              "expr": "avg by (namespace, pod, container) (container_memory_working_set_bytes{container!=\"\"}) / avg by (namespace, pod, container) (kube_pod_container_resource_requests{resource=\"memory\"}) < 0.3",
+              "format": "table",
+              "instant": true
+            }]
+          },
+          {
+            "id": 5,
+            "title": "Right-Sizing Recommendations",
+            "type": "table",
+            "gridPos": {"h": 10, "w": 24, "x": 0, "y": 12},
+            "targets": [{
+              "expr": "opencost_rightsizing_recommendations",
+              "format": "table",
+              "instant": true
+            }],
+            "transformations": [{
+              "id": "organize",
+              "options": {
+                "renameByName": {
+                  "namespace": "Namespace",
+                  "workload": "Workload",
+                  "container": "Container",
+                  "current_cpu": "Current CPU",
+                  "recommended_cpu": "Recommended CPU",
+                  "current_memory": "Current Memory",
+                  "recommended_memory": "Recommended Memory",
+                  "monthly_savings": "Monthly Savings ($)"
+                }
+              }
+            }]
+          },
+          {
+            "id": 6,
+            "title": "Unused PVCs",
+            "type": "table",
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 22},
+            "targets": [{
+              "expr": "count by (namespace, persistentvolumeclaim) (kube_persistentvolumeclaim_info unless on (persistentvolumeclaim, namespace) kube_pod_spec_volumes_persistentvolumeclaims_info)",
+              "format": "table",
+              "instant": true
+            }]
+          },
+          {
+            "id": 7,
+            "title": "Idle Deployments (0 Replicas)",
+            "type": "table",
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 22},
+            "targets": [{
+              "expr": "kube_deployment_spec_replicas == 0",
+              "format": "table",
+              "instant": true
+            }]
+          }
+        ]
+      }
+    }
+
+  # Resource Efficiency Dashboard
+  resource-efficiency.json: |
+    {
+      "dashboard": {
+        "title": "Cost Management - Resource Efficiency",
+        "tags": ["cost", "efficiency", "utilization"],
+        "timezone": "browser",
+        "schemaVersion": 16,
+        "version": 1,
+        "refresh": "1m",
+        "panels": [
+          {
+            "id": 1,
+            "title": "Cluster CPU Efficiency",
+            "type": "gauge",
+            "gridPos": {"h": 6, "w": 8, "x": 0, "y": 0},
+            "targets": [{
+              "expr": "sum(rate(container_cpu_usage_seconds_total{container!=\"\"}[5m])) / sum(kube_pod_container_resource_requests{resource=\"cpu\"}) * 100",
+              "legendFormat": "Efficiency"
+            }],
+            "fieldConfig": {
+              "defaults": {
+                "unit": "percent",
+                "min": 0,
+                "max": 100,
+                "thresholds": {
+                  "steps": [
+                    {"value": 0, "color": "red"},
+                    {"value": 40, "color": "yellow"},
+                    {"value": 60, "color": "green"}
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "id": 2,
+            "title": "Cluster Memory Efficiency",
+            "type": "gauge",
+            "gridPos": {"h": 6, "w": 8, "x": 8, "y": 0},
+            "targets": [{
+              "expr": "sum(container_memory_working_set_bytes{container!=\"\"}) / sum(kube_pod_container_resource_requests{resource=\"memory\"}) * 100",
+              "legendFormat": "Efficiency"
+            }],
+            "fieldConfig": {
+              "defaults": {
+                "unit": "percent",
+                "min": 0,
+                "max": 100,
+                "thresholds": {
+                  "steps": [
+                    {"value": 0, "color": "red"},
+                    {"value": 50, "color": "yellow"},
+                    {"value": 70, "color": "green"}
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "id": 3,
+            "title": "Cost Efficiency Score",
+            "type": "gauge",
+            "gridPos": {"h": 6, "w": 8, "x": 16, "y": 0},
+            "targets": [{
+              "expr": "((sum(rate(container_cpu_usage_seconds_total{container!=\"\"}[5m])) / sum(kube_pod_container_resource_requests{resource=\"cpu\"})) + (sum(container_memory_working_set_bytes{container!=\"\"}) / sum(kube_pod_container_resource_requests{resource=\"memory\"}))) / 2 * 100",
+              "legendFormat": "Score"
+            }],
+            "fieldConfig": {
+              "defaults": {
+                "unit": "percent",
+                "min": 0,
+                "max": 100,
+                "thresholds": {
+                  "steps": [
+                    {"value": 0, "color": "red"},
+                    {"value": 50, "color": "yellow"},
+                    {"value": 75, "color": "green"}
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "id": 4,
+            "title": "Namespace Resource Efficiency",
+            "type": "heatmap",
+            "gridPos": {"h": 10, "w": 24, "x": 0, "y": 6},
+            "targets": [{
+              "expr": "sum by (namespace) (rate(container_cpu_usage_seconds_total{container!=\"\"}[5m])) / sum by (namespace) (kube_pod_container_resource_requests{resource=\"cpu\"})",
+              "legendFormat": "{{ namespace }}"
+            }]
+          },
+          {
+            "id": 5,
+            "title": "Request vs Limit Utilization by Namespace",
+            "type": "graph",
+            "gridPos": {"h": 10, "w": 24, "x": 0, "y": 16},
+            "targets": [
+              {
+                "expr": "sum by (namespace) (rate(container_cpu_usage_seconds_total{container!=\"\"}[5m]))",
+                "legendFormat": "{{ namespace }} - Actual"
+              },
+              {
+                "expr": "sum by (namespace) (kube_pod_container_resource_requests{resource=\"cpu\"})",
+                "legendFormat": "{{ namespace }} - Requested"
+              },
+              {
+                "expr": "sum by (namespace) (kube_pod_container_resource_limits{resource=\"cpu\"})",
+                "legendFormat": "{{ namespace }} - Limit"
+              }
+            ],
+            "seriesOverrides": [
+              {"alias": "/.*Requested.*/", "fill": 0, "dashes": true},
+              {"alias": "/.*Limit.*/", "fill": 0, "dashes": true, "color": "red"}
+            ]
+          }
+        ]
+      }
+    }
+
+---
+# Grafana datasource for OpenCost
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasource-opencost
+  namespace: opencost
+  labels:
+    grafana_datasource: "1"
+data:
+  opencost-datasource.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: OpenCost
+        type: prometheus
+        access: proxy
+        url: http://opencost.opencost.svc:9003
+        isDefault: false
+        editable: true
+        jsonData:
+          httpMethod: GET
+          timeInterval: 30s

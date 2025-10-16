@@ -1,0 +1,161 @@
+---
+# Chaos Mesh Installation via Helm
+# This file contains the Helm installation commands and custom values
+
+# Installation commands:
+# helm repo add chaos-mesh https://charts.chaos-mesh.org
+# helm repo update
+#
+# helm install chaos-mesh chaos-mesh/chaos-mesh \
+#   --namespace=chaos-testing \
+#   --create-namespace \
+#   --version 2.6.3 \
+#   --values=/path/to/chaos-mesh-values.yaml
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chaos-mesh-values
+  namespace: chaos-testing
+data:
+  values.yaml: |
+    # Chaos Mesh Helm Values
+
+    # Controller Manager
+    controllerManager:
+      replicaCount: 1
+      resources:
+        limits:
+          cpu: 500m
+          memory: 1024Mi
+        requests:
+          cpu: 250m
+          memory: 512Mi
+
+      # Enable leadership election for HA
+      leaderElection:
+        enabled: true
+        leaseDuration: 15s
+        renewDeadline: 10s
+        retryPeriod: 2s
+
+    # Chaos Daemon - runs on each node
+    chaosDaemon:
+      runtime: containerd
+      socketPath: /run/containerd/containerd.sock
+
+      resources:
+        limits:
+          cpu: 500m
+          memory: 1024Mi
+        requests:
+          cpu: 250m
+          memory: 512Mi
+
+      # Pod security context
+      podSecurityPolicy: true
+
+      # Enable metrics
+      metrics:
+        enabled: true
+        port: 31766
+
+    # Dashboard
+    dashboard:
+      create: true
+      replicaCount: 1
+
+      resources:
+        limits:
+          cpu: 500m
+          memory: 1024Mi
+        requests:
+          cpu: 250m
+          memory: 512Mi
+
+      # Ingress for dashboard
+      ingress:
+        enabled: true
+        className: nginx
+        annotations:
+          cert-manager.io/cluster-issuer: letsencrypt-prod
+          nginx.ingress.kubernetes.io/ssl-redirect: "true"
+        hosts:
+        - host: chaos-mesh.example.com
+          paths:
+          - path: /
+            pathType: Prefix
+        tls:
+        - secretName: chaos-mesh-tls
+          hosts:
+          - chaos-mesh.example.com
+
+      # Security context
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        runAsNonRoot: true
+
+    # DNS Server for DNSChaos
+    dnsServer:
+      create: true
+      resources:
+        limits:
+          cpu: 200m
+          memory: 512Mi
+        requests:
+          cpu: 100m
+          memory: 256Mi
+
+    # Monitoring
+    prometheus:
+      enabled: true
+      serviceMonitor:
+        enabled: true
+        namespace: monitoring
+        labels:
+          prometheus: kube-prometheus
+
+    # RBAC
+    rbac:
+      create: true
+
+    # Service Account
+    serviceAccount:
+      create: true
+      name: chaos-mesh
+
+    # Security
+    enableProfiling: false
+    enableFilterNamespace: true
+    enableCtrlServer: false
+
+    # Webhook
+    webhook:
+      certManager:
+        enabled: true
+
+      timeoutSeconds: 5
+
+      failurePolicy: Fail
+
+      resources:
+        limits:
+          cpu: 200m
+          memory: 512Mi
+        requests:
+          cpu: 100m
+          memory: 256Mi
+
+    # Chaos experiments default TTL
+    chaosDaemon:
+      env:
+        - name: CHAOS_DAEMON_TTL
+          value: "1h"
+
+    # Image settings
+    images:
+      registry: ghcr.io
+      tag: v2.6.3

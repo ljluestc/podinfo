@@ -1,0 +1,542 @@
+---
+# Operational Runbooks ConfigMap
+# Extended runbooks for cluster operations
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-operations-runbooks
+  namespace: kube-system
+  labels:
+    app: cluster-operations
+    component: runbooks
+data:
+  cluster-upgrade-runbook.md: |
+    # Runbook: Cluster Upgrade
+
+    ## Pre-Upgrade Checklist
+
+    - [ ] Review target Kubernetes version release notes
+    - [ ] Check deprecated API usage in workloads
+    - [ ] Verify all nodes are healthy
+    - [ ] Backup etcd cluster
+    - [ ] Test upgrade in staging environment
+    - [ ] Schedule maintenance window
+    - [ ] Notify stakeholders
+    - [ ] Prepare rollback plan
+
+    ## Upgrade Procedure
+
+    ### 1. Pre-Upgrade Validation
+
+    ```bash
+    # Run pre-checks
+    ./01-cluster-upgrade.sh --target-version 1.29.0 --pre-check
+
+    # Backup etcd
+    ./01-cluster-upgrade.sh --target-version 1.29.0 --backup-only
+
+    # Check deprecated APIs
+    kubectl get --raw /apis | jq -r '.groups[].versions[].version' | sort -u
+    ```
+
+    ### 2. Upgrade Control Plane
+
+    ```bash
+    # Upgrade first control plane node
+    ./01-cluster-upgrade.sh --target-version 1.29.0 --control-plane --node cp-1
+
+    # Wait and verify
+    kubectl get nodes
+    kubectl get pods -n kube-system
+
+    # Upgrade remaining control plane nodes one by one
+    ./01-cluster-upgrade.sh --target-version 1.29.0 --control-plane --node cp-2
+    ./01-cluster-upgrade.sh --target-version 1.29.0 --control-plane --node cp-3
+    ```
+
+    ### 3. Upgrade Worker Nodes
+
+    ```bash
+    # Upgrade workers one at a time or in batches
+    for worker in $(kubectl get nodes -l '!node-role.kubernetes.io/control-plane' -o name); do
+      ./01-cluster-upgrade.sh --target-version 1.29.0 --node $worker
+      sleep 60
+    done
+    ```
+
+    ### 4. Post-Upgrade Validation
+
+    ```bash
+    # Verify cluster version
+    kubectl version
+
+    # Check all nodes
+    kubectl get nodes -o wide
+
+    # Run health checks
+    ./06-health-checks.sh --full
+
+    # Verify workloads
+    kubectl get pods -A
+
+    # Check for issues
+    kubectl get events -A --sort-by='.lastTimestamp' | tail -50
+    ```
+
+    ## Rollback Procedure
+
+    If issues occur during upgrade:
+
+    ```bash
+    # List available backups
+    ./02-cluster-rollback.sh --list-backups
+
+    # Rollback specific node
+    ./02-cluster-rollback.sh --node worker-1 --version 1.28.0
+
+    # Emergency etcd restore
+    ./02-cluster-rollback.sh --etcd-backup /path/to/backup.db
+    ```
+
+    ## Post-Upgrade Tasks
+
+    - [ ] Update documentation with new version
+    - [ ] Update monitoring dashboards
+    - [ ] Review and update deprecated API usage
+    - [ ] Send upgrade completion notification
+    - [ ] Schedule post-upgrade review meeting
+
+  node-maintenance-runbook.md: |
+    # Runbook: Node Maintenance
+
+    ## Planned Node Maintenance
+
+    ### 1. Prepare Node for Maintenance
+
+    ```bash
+    # Check node status
+    ./03-node-management.sh health-check worker-1
+
+    # Cordon node to prevent new pods
+    ./03-node-management.sh cordon worker-1
+
+    # Drain node safely
+    ./03-node-management.sh drain worker-1 --timeout 900
+    ```
+
+    ### 2. Perform Maintenance
+
+    SSH to the node and perform maintenance:
+
+    ```bash
+    # System updates
+    sudo apt-get update && sudo apt-get upgrade -y
+
+    # Reboot if kernel updated
+    sudo reboot
+
+    # Clean up disk space
+    sudo crictl rmi --prune
+    sudo journalctl --vacuum-time=3d
+
+    # Check system health
+    sudo systemctl status kubelet
+    sudo systemctl status containerd
+    ```
+
+    ### 3. Return Node to Service
+
+    ```bash
+    # Wait for node to be ready after reboot
+    watch kubectl get node worker-1
+
+    # Uncordon node
+    ./03-node-management.sh uncordon worker-1
+
+    # Verify pods are scheduled back
+    kubectl get pods -A --field-selector spec.nodeName=worker-1
+
+    # Monitor node
+    kubectl top node worker-1
+    ```
+
+    ## Node Failure Response
+
+    ### 1. Detect and Assess
+
+    ```bash
+    # Check node status
+    kubectl get nodes
+
+    # Get node details
+    kubectl describe node worker-1
+
+    # Check node events
+    kubectl get events --field-selector involvedObject.name=worker-1
+
+    # Review logs (if accessible)
+    ssh worker-1 'journalctl -u kubelet -n 200'
+    ```
+
+    ### 2. Attempt Repair
+
+    ```bash
+    # Run repair diagnostics
+    ./03-node-management.sh repair worker-1
+
+    # Common fixes:
+    # - Restart kubelet
+    # - Restart container runtime
+    # - Clean up disk space
+    # - Reboot node
+    ```
+
+    ### 3. Replace Node if Necessary
+
+    ```bash
+    # If repair fails, replace node
+    ./03-node-management.sh replace worker-1
+
+    # Follow prompts to:
+    # - Drain node
+    # - Remove from cluster
+    # - Provision new node
+    # - Join new node to cluster
+    ```
+
+  capacity-planning-runbook.md: |
+    # Runbook: Capacity Planning
+
+    ## Regular Capacity Review
+
+    ### Weekly Capacity Check
+
+    ```bash
+    # Review current capacity
+    kubectl top nodes
+    kubectl top pods -A --sort-by=cpu | head -20
+    kubectl top pods -A --sort-by=memory | head -20
+
+    # Check capacity alerts
+    kubectl get prometheusrules -n monitoring capacity-monitoring-rules -o yaml
+
+    # Review capacity dashboard
+    # Access Grafana → Kubernetes Capacity Planning dashboard
+    ```
+
+    ### Monthly Capacity Planning
+
+    ```bash
+    # Generate capacity report
+    kubectl logs -n monitoring -l app=capacity-report
+
+    # Analyze trends
+    # - Review 7-day forecasts
+    # - Check growth rates
+    # - Identify bottlenecks
+
+    # Plan scaling
+    # - Add nodes if capacity > 75%
+    # - Optimize workloads if possible
+    # - Scale storage if needed
+    ```
+
+    ## Capacity Scaling Actions
+
+    ### Add Worker Nodes
+
+    ```bash
+    # Provision new nodes
+    # 1. Create VMs/instances
+    # 2. Install Kubernetes components
+    # 3. Join to cluster
+
+    # Get join command
+    kubeadm token create --print-join-command
+
+    # On new node
+    sudo kubeadm join ...
+
+    # Verify
+    kubectl get nodes
+    ```
+
+    ### Optimize Resource Usage
+
+    ```bash
+    # Find over-provisioned pods
+    kubectl get pods -A -o json | jq -r '.items[] |
+      select(.spec.containers[].resources.requests.cpu) |
+      {namespace:.metadata.namespace, name:.metadata.name,
+       cpu:.spec.containers[].resources.requests.cpu}'
+
+    # Right-size resources
+    kubectl set resources deployment <name> -n <namespace> \
+      --requests=cpu=500m,memory=512Mi \
+      --limits=cpu=1,memory=1Gi
+
+    # Enable VPA for automatic recommendations
+    kubectl apply -f vpa-recommendations.yaml
+    ```
+
+    ### Scale Storage
+
+    ```bash
+    # Check PV usage
+    kubectl get pv
+    kubectl get pvc -A
+
+    # Expand PVC if supported
+    kubectl patch pvc <pvc-name> -n <namespace> \
+      -p '{"spec":{"resources":{"requests":{"storage":"100Gi"}}}}'
+
+    # Add new storage class if needed
+    kubectl apply -f new-storage-class.yaml
+    ```
+
+  incident-response-runbook.md: |
+    # Runbook: Incident Response
+
+    ## Severity Levels
+
+    - **P0 (Critical)**: Cluster down, major outage
+    - **P1 (High)**: Partial outage, degraded performance
+    - **P2 (Medium)**: Minor issues, workarounds available
+    - **P3 (Low)**: Cosmetic issues, feature requests
+
+    ## P0: Cluster Down
+
+    ### Immediate Actions
+
+    ```bash
+    # 1. Check API server
+    curl -k https://API_SERVER:6443/healthz
+
+    # 2. Check control plane nodes
+    ssh cp-1 'systemctl status kube-apiserver'
+    ssh cp-1 'systemctl status kube-controller-manager'
+    ssh cp-1 'systemctl status kube-scheduler'
+
+    # 3. Check etcd
+    ssh cp-1 'ETCDCTL_API=3 etcdctl endpoint health'
+
+    # 4. Check logs
+    ssh cp-1 'journalctl -u kube-apiserver -n 100'
+    ```
+
+    ### Recovery Steps
+
+    ```bash
+    # If API server down - restart
+    ssh cp-1 'systemctl restart kube-apiserver'
+
+    # If etcd corrupted - restore from backup
+    ./02-cluster-rollback.sh --etcd-backup <latest-backup>
+
+    # If multiple components down - restore cluster
+    # Follow disaster recovery procedure
+    ```
+
+    ## P1: Node Failure
+
+    ```bash
+    # 1. Identify failed node
+    kubectl get nodes
+
+    # 2. Check what's running on it
+    kubectl get pods -A --field-selector spec.nodeName=<node>
+
+    # 3. Cordon and drain
+    ./03-node-management.sh cordon <node>
+    ./03-node-management.sh drain <node> --timeout 300 --force
+
+    # 4. Repair or replace
+    ./03-node-management.sh repair <node>
+    # OR
+    ./03-node-management.sh replace <node>
+    ```
+
+    ## P1: Pod CrashLooping
+
+    ```bash
+    # 1. Identify the pod
+    kubectl get pods -A | grep -E "CrashLoop|Error"
+
+    # 2. Get logs
+    kubectl logs -n <namespace> <pod> --previous
+    kubectl logs -n <namespace> <pod> --tail=100
+
+    # 3. Describe pod for events
+    kubectl describe pod -n <namespace> <pod>
+
+    # 4. Check resources
+    kubectl top pod -n <namespace> <pod>
+
+    # 5. Common fixes:
+    # - Increase memory limits
+    # - Fix configuration
+    # - Update image
+    # - Check dependencies
+
+    # 6. Rollback if recent deployment
+    kubectl rollout undo deployment -n <namespace> <deployment>
+    ```
+
+    ## Post-Incident Tasks
+
+    - [ ] Document timeline
+    - [ ] Root cause analysis
+    - [ ] Update runbooks
+    - [ ] Implement preventive measures
+    - [ ] Send post-mortem report
+
+  backup-restore-runbook.md: |
+    # Runbook: Backup and Restore
+
+    ## Regular Backups
+
+    ### Automated etcd Backups
+
+    Backups run automatically during maintenance windows.
+
+    Manual backup:
+
+    ```bash
+    # Create backup
+    ./01-cluster-upgrade.sh --backup-only
+
+    # Verify backup
+    ls -lh /var/backups/k8s-cluster/
+
+    # Test restore in staging
+    ./02-cluster-rollback.sh --etcd-backup <backup-file> --staging
+    ```
+
+    ### Application Data Backups
+
+    ```bash
+    # Velero backups
+    velero backup create daily-backup --include-namespaces=production
+
+    # Verify backup
+    velero backup describe daily-backup
+
+    # Schedule regular backups
+    velero schedule create daily --schedule="0 2 * * *" \
+      --include-namespaces=production
+    ```
+
+    ## Disaster Recovery
+
+    ### Full Cluster Restore
+
+    ```bash
+    # 1. Restore etcd from backup
+    ./02-cluster-rollback.sh --etcd-backup <backup-file>
+
+    # 2. Verify cluster components
+    kubectl get componentstatuses
+
+    # 3. Restore application data
+    velero restore create --from-backup daily-backup
+
+    # 4. Verify applications
+    ./06-health-checks.sh --full
+
+    # 5. Update DNS/load balancers
+    # Point traffic to restored cluster
+    ```
+
+    ### Partial Restore
+
+    ```bash
+    # Restore specific namespace
+    velero restore create --from-backup daily-backup \
+      --include-namespaces=production
+
+    # Restore specific resources
+    velero restore create --from-backup daily-backup \
+      --include-resources=deployments,services \
+      --namespace-mappings=old-ns:new-ns
+    ```
+
+  monitoring-troubleshooting-runbook.md: |
+    # Runbook: Monitoring and Troubleshooting
+
+    ## Prometheus Issues
+
+    ### Prometheus Not Scraping
+
+    ```bash
+    # Check Prometheus targets
+    kubectl port-forward -n monitoring svc/prometheus 9090:9090
+    # Open browser: http://localhost:9090/targets
+
+    # Check ServiceMonitor resources
+    kubectl get servicemonitor -A
+
+    # Verify labels match
+    kubectl get pod <pod> -o jsonpath='{.metadata.labels}'
+
+    # Check Prometheus logs
+    kubectl logs -n monitoring prometheus-0
+    ```
+
+    ### High Memory Usage
+
+    ```bash
+    # Check retention settings
+    kubectl get prometheus -n monitoring -o yaml | grep retention
+
+    # Reduce retention or increase resources
+    kubectl edit prometheus -n monitoring
+    ```
+
+    ## Grafana Issues
+
+    ### Dashboard Not Loading
+
+    ```bash
+    # Check Grafana logs
+    kubectl logs -n monitoring deployment/grafana
+
+    # Verify ConfigMap
+    kubectl get configmap -n monitoring -l grafana_dashboard=1
+
+    # Reload dashboards
+    kubectl rollout restart deployment -n monitoring grafana
+    ```
+
+    ## Alert Issues
+
+    ### Alerts Not Firing
+
+    ```bash
+    # Check Prometheus rules
+    kubectl get prometheusrules -A
+
+    # Verify alert is defined
+    kubectl get prometheusrules -n monitoring -o yaml | grep <alert-name>
+
+    # Check Alertmanager
+    kubectl logs -n monitoring alertmanager-0
+
+    # Test alert
+    kubectl port-forward -n monitoring svc/alertmanager 9093:9093
+    # Open: http://localhost:9093
+    ```
+
+    ### Alert Storm
+
+    ```bash
+    # Silence alerts temporarily
+    kubectl port-forward -n monitoring svc/alertmanager 9093:9093
+    # Create silence in UI
+
+    # Or via CLI
+    amtool silence add alertname="NodeDown" --duration=1h
+
+    # Investigate root cause
+    ./06-health-checks.sh --full
+    ```

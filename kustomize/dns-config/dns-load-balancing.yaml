@@ -1,0 +1,342 @@
+---
+# DNS-based load balancing using CoreDNS
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns-loadbalancing
+  namespace: kube-system
+  labels:
+    app: coredns
+    component: loadbalancing
+data:
+  # Load balancing configuration with multiple strategies
+  loadbalancing.server: |
+    # Round-robin load balancing for multi-region services
+    lb.podinfo.local:53 {
+        errors
+        cache 30
+
+        # Round-robin load balancing plugin
+        loadbalance round_robin
+
+        # Multiple A records for round-robin
+        template IN A lb.podinfo.local {
+            answer "{{ .Name }} 60 IN A 10.0.1.10"
+            answer "{{ .Name }} 60 IN A 10.0.2.10"
+            answer "{{ .Name }} 60 IN A 10.0.3.10"
+        }
+
+        log
+        reload
+    }
+
+    # Weighted load balancing for gradual rollouts
+    weighted.podinfo.local:53 {
+        errors
+        cache 30
+
+        # File-based zone with weighted records
+        file /etc/coredns/zones/weighted-lb.zone weighted.podinfo.local
+
+        log
+        reload
+    }
+
+    # Geographic load balancing
+    geo.podinfo.local:53 {
+        errors
+        cache 30
+
+        # Different responses based on client location
+        # This requires the geoip plugin (not enabled by default)
+
+        # Fallback to round-robin
+        loadbalance round_robin
+
+        file /etc/coredns/zones/geo-lb.zone geo.podinfo.local
+
+        log
+        reload
+    }
+---
+# Weighted load balancing zone file
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns-lb-zones
+  namespace: kube-system
+  labels:
+    app: coredns
+    component: loadbalancing
+data:
+  weighted-lb.zone: |
+    $ORIGIN weighted.podinfo.local.
+    $TTL 60
+
+    ; SOA record
+    @       IN      SOA     ns.weighted.podinfo.local. admin.weighted.podinfo.local. (
+                            2025101301
+                            3600
+                            1800
+                            604800
+                            60 )
+
+    @       IN      NS      ns.weighted.podinfo.local.
+
+    ; Weighted round-robin using low TTL
+    ; Clients will re-query frequently, distributing load
+
+    ; Primary datacenter (70% weight - return more frequently)
+    @       IN      A       10.0.1.10
+    @       IN      A       10.0.1.11
+    @       IN      A       10.0.1.12
+    @       IN      A       10.0.1.13
+    @       IN      A       10.0.1.14
+    @       IN      A       10.0.1.15
+    @       IN      A       10.0.1.16
+
+    ; Secondary datacenter (30% weight - return less frequently)
+    @       IN      A       10.0.2.10
+    @       IN      A       10.0.2.11
+    @       IN      A       10.0.2.12
+
+    ; Active-passive failover using priority
+    primary     IN      A       10.0.1.10
+    secondary   IN      A       10.0.2.10
+
+  geo-lb.zone: |
+    $ORIGIN geo.podinfo.local.
+    $TTL 60
+
+    @       IN      SOA     ns.geo.podinfo.local. admin.geo.podinfo.local. (
+                            2025101301
+                            3600
+                            1800
+                            604800
+                            60 )
+
+    @       IN      NS      ns.geo.podinfo.local.
+
+    ; Geographic endpoints (would use geoip plugin for real geo-routing)
+    ; Fallback to closest available region
+
+    us-east     IN      A       10.0.1.10
+    us-west     IN      A       10.0.2.10
+    eu-west     IN      A       10.0.3.10
+    ap-south    IN      A       10.0.4.10
+
+    ; Default endpoint returns all regions
+    @           IN      A       10.0.1.10
+    @           IN      A       10.0.2.10
+    @           IN      A       10.0.3.10
+    @           IN      A       10.0.4.10
+---
+# Service with multi-endpoint DNS for load balancing
+apiVersion: v1
+kind: Service
+metadata:
+  name: podinfo-lb
+  namespace: default
+  labels:
+    app: podinfo
+    lb-type: dns-round-robin
+  annotations:
+    # External DNS will create multiple A records
+    external-dns.alpha.kubernetes.io/hostname: lb.podinfo.local
+    external-dns.alpha.kubernetes.io/ttl: "60"
+spec:
+  type: ClusterIP
+  sessionAffinity: None  # Disable session affinity for better load distribution
+  ports:
+    - port: 9898
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app: podinfo
+---
+# Endpoints with manual load balancing configuration
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: podinfo-lb-manual
+  namespace: default
+  labels:
+    app: podinfo
+    lb-type: manual
+subsets:
+  # Zone 1 endpoints
+  - addresses:
+      - ip: 10.0.1.10
+        hostname: podinfo-zone1-1
+      - ip: 10.0.1.11
+        hostname: podinfo-zone1-2
+    ports:
+      - port: 9898
+        protocol: TCP
+        name: http
+
+  # Zone 2 endpoints
+  - addresses:
+      - ip: 10.0.2.10
+        hostname: podinfo-zone2-1
+      - ip: 10.0.2.11
+        hostname: podinfo-zone2-2
+    ports:
+      - port: 9898
+        protocol: TCP
+        name: http
+---
+# Service for manual endpoints
+apiVersion: v1
+kind: Service
+metadata:
+  name: podinfo-lb-manual
+  namespace: default
+  labels:
+    app: podinfo
+    lb-type: manual
+  annotations:
+    external-dns.alpha.kubernetes.io/hostname: manual-lb.podinfo.local
+spec:
+  type: ClusterIP
+  ports:
+    - port: 9898
+      protocol: TCP
+      name: http
+---
+# ConfigMap with DNS load balancing examples
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dns-lb-examples
+  namespace: default
+  labels:
+    component: dns-loadbalancing
+data:
+  test-dns-lb.sh: |
+    #!/bin/bash
+    # Test DNS-based load balancing
+
+    echo "==================================="
+    echo "DNS Load Balancing Tests"
+    echo "==================================="
+    echo ""
+
+    # Test 1: Multiple queries to see round-robin
+    echo "1. Round-Robin Load Balancing Test"
+    echo "Making 10 queries to lb.podinfo.local:"
+    for i in {1..10}; do
+        echo "Query $i:"
+        nslookup lb.podinfo.local | grep "Address:" | tail -1
+    done
+    echo ""
+
+    # Test 2: Check TTL values
+    echo "2. TTL Check (low TTL for dynamic load balancing):"
+    dig lb.podinfo.local +noall +answer
+    echo ""
+
+    # Test 3: Weighted load balancing
+    echo "3. Weighted Load Balancing:"
+    dig weighted.podinfo.local +noall +answer
+    echo ""
+
+    # Test 4: Geographic load balancing
+    echo "4. Geographic Load Balancing:"
+    for region in us-east us-west eu-west ap-south; do
+        echo "Region: $region"
+        dig $region.geo.podinfo.local +short
+    done
+    echo ""
+
+    # Test 5: Check SRV records for service discovery with load balancing
+    echo "5. SRV Record Load Balancing:"
+    dig _http._tcp.lb.podinfo.local SRV +noall +answer
+    echo ""
+
+    echo "==================================="
+    echo "Load balancing tests complete"
+    echo "==================================="
+
+  benchmark-dns-lb.sh: |
+    #!/bin/bash
+    # Benchmark DNS load balancing performance
+
+    DOMAIN=${1:-lb.podinfo.local}
+    QUERIES=${2:-1000}
+
+    echo "==================================="
+    echo "DNS Load Balancing Benchmark"
+    echo "Domain: $DOMAIN"
+    echo "Queries: $QUERIES"
+    echo "==================================="
+    echo ""
+
+    # Count IP distribution
+    declare -A ip_count
+
+    echo "Executing $QUERIES DNS queries..."
+    for i in $(seq 1 $QUERIES); do
+        IP=$(dig +short $DOMAIN | head -1)
+        if [ ! -z "$IP" ]; then
+            ip_count[$IP]=$((${ip_count[$IP]:-0} + 1))
+        fi
+
+        # Show progress every 100 queries
+        if [ $((i % 100)) -eq 0 ]; then
+            echo "  Completed $i queries..."
+        fi
+    done
+
+    echo ""
+    echo "Load Distribution:"
+    echo "===================="
+    for ip in "${!ip_count[@]}"; do
+        count=${ip_count[$ip]}
+        percentage=$((count * 100 / QUERIES))
+        echo "$ip: $count queries ($percentage%)"
+    done
+
+    echo ""
+    echo "==================================="
+    echo "Benchmark complete"
+    echo "==================================="
+
+  dns-lb-architecture.txt: |
+    DNS-Based Load Balancing Architecture
+    ======================================
+
+    1. Round-Robin Load Balancing
+       - Multiple A records returned for single query
+       - Client selects IP (typically first one)
+       - CoreDNS rotates order of records
+       - Low TTL forces frequent re-queries
+
+    2. Weighted Load Balancing
+       - Different number of A records for each backend
+       - More records = more weight
+       - Example: 7 records for primary, 3 for secondary = 70/30 split
+
+    3. Geographic Load Balancing
+       - Different responses based on client location
+       - Requires GeoIP plugin in CoreDNS
+       - Routes traffic to nearest datacenter
+
+    4. Health-Based Load Balancing
+       - Integration with health checks
+       - Remove unhealthy endpoints from DNS responses
+       - Automatic failover to healthy backends
+
+    5. Session Affinity
+       - Can be achieved with longer TTL
+       - Client caches same IP for duration
+       - Trade-off with load distribution
+
+    Considerations:
+    ---------------
+    - TTL affects balance granularity vs query load
+    - Client DNS caching can affect distribution
+    - Not suitable for real-time failover
+    - Best for geographic distribution
+    - Combine with application-level load balancing

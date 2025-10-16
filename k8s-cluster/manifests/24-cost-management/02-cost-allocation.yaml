@@ -1,0 +1,303 @@
+---
+# Cost Allocation Labels and Annotations
+# This file defines the strategy for allocating costs across teams, applications, and environments
+
+# ConfigMap with cost allocation policies
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cost-allocation-config
+  namespace: opencost
+  labels:
+    app: cost-allocation
+data:
+  # Cost allocation rules
+  allocation-rules.yaml: |
+    # Define how costs should be allocated
+    allocation:
+      # Primary allocation dimensions
+      dimensions:
+        - namespace      # Kubernetes namespace
+        - team          # Team label
+        - application   # Application label
+        - environment   # Environment (dev/staging/prod)
+        - cost-center   # Business cost center
+        - project       # Project identifier
+
+      # Shared cost allocation
+      shared-costs:
+        # How to distribute shared infrastructure costs
+        distribution-method: proportional  # Options: proportional, equal, custom
+
+        # Namespaces that should have costs redistributed
+        shared-namespaces:
+          - kube-system
+          - monitoring
+          - ingress-nginx
+          - cert-manager
+          - opencost
+
+        # Labels to identify shared resources
+        shared-labels:
+          shared-resource: "true"
+
+      # Idle resource handling
+      idle-resources:
+        # How to report idle costs
+        report-separately: true
+        # Threshold for considering resources idle (percentage)
+        cpu-idle-threshold: 10
+        memory-idle-threshold: 15
+
+  # Label taxonomy for cost allocation
+  label-taxonomy.yaml: |
+    # Required labels for cost tracking
+    required-labels:
+      team:
+        description: "Team responsible for the workload"
+        examples:
+          - platform-team
+          - data-team
+          - frontend-team
+          - backend-team
+
+      application:
+        description: "Application or service name"
+        examples:
+          - podinfo
+          - auth-service
+          - payment-gateway
+
+      environment:
+        description: "Deployment environment"
+        allowed-values:
+          - development
+          - staging
+          - production
+          - test
+
+      cost-center:
+        description: "Business unit cost center code"
+        format: "CC-XXXX"
+        examples:
+          - CC-1001
+          - CC-2005
+
+    # Optional labels for enhanced tracking
+    optional-labels:
+      project:
+        description: "Project or initiative identifier"
+      owner:
+        description: "Email of the resource owner"
+      billing-group:
+        description: "Alternative billing grouping"
+
+---
+# NetworkPolicy to allow OpenCost to access Prometheus
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: opencost-prometheus-access
+  namespace: opencost
+spec:
+  podSelector:
+    matchLabels:
+      app: opencost
+  policyTypes:
+    - Egress
+  egress:
+    # Allow DNS
+    - to:
+      - namespaceSelector:
+          matchLabels:
+            name: kube-system
+      ports:
+      - protocol: UDP
+        port: 53
+    # Allow access to Prometheus
+    - to:
+      - namespaceSelector:
+          matchLabels:
+            name: monitoring
+      ports:
+      - protocol: TCP
+        port: 9090
+
+---
+# ResourceQuota with cost tracking labels for a sample namespace
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: team-quota-example
+  namespace: default
+  labels:
+    team: platform-team
+    cost-center: CC-1001
+    managed-by: cost-management
+  annotations:
+    cost-allocation/team: "platform-team"
+    cost-allocation/department: "engineering"
+    cost-allocation/budget-code: "ENG-2024-Q4"
+spec:
+  hard:
+    requests.cpu: "10"
+    requests.memory: "20Gi"
+    limits.cpu: "20"
+    limits.memory: "40Gi"
+    pods: "50"
+    services: "10"
+    persistentvolumeclaims: "10"
+
+---
+# LimitRange with cost optimization guidelines
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: cost-optimized-limits
+  namespace: default
+  labels:
+    purpose: cost-optimization
+  annotations:
+    description: "Default resource limits to prevent cost overruns"
+spec:
+  limits:
+    # Pod limits
+    - type: Pod
+      max:
+        cpu: "4"
+        memory: "8Gi"
+      min:
+        cpu: "10m"
+        memory: "10Mi"
+
+    # Container limits
+    - type: Container
+      default:
+        cpu: "500m"
+        memory: "512Mi"
+      defaultRequest:
+        cpu: "100m"
+        memory: "128Mi"
+      max:
+        cpu: "2"
+        memory: "4Gi"
+      min:
+        cpu: "10m"
+        memory: "10Mi"
+
+    # PVC limits
+    - type: PersistentVolumeClaim
+      max:
+        storage: "100Gi"
+      min:
+        storage: "1Gi"
+
+---
+# Example deployment with proper cost allocation labels
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cost-tracked-app-example
+  namespace: default
+  labels:
+    app: example-app
+    team: platform-team
+    application: podinfo
+    environment: production
+    cost-center: CC-1001
+    project: kubernetes-security
+  annotations:
+    cost-allocation/team: "platform-team"
+    cost-allocation/owner: "platform-team@example.com"
+    cost-allocation/budget-code: "ENG-2024-Q4"
+    cost-allocation/monthly-budget: "500"
+    description: "Example deployment with cost tracking labels"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: example-app
+  template:
+    metadata:
+      labels:
+        app: example-app
+        team: platform-team
+        application: podinfo
+        environment: production
+        cost-center: CC-1001
+      annotations:
+        cost-allocation/team: "platform-team"
+    spec:
+      containers:
+        - name: app
+          image: nginx:alpine
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          ports:
+            - containerPort: 80
+
+---
+# ValidatingWebhookConfiguration to enforce cost allocation labels (requires OPA/Gatekeeper)
+# This ensures all new resources have required cost tracking labels
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8srequiredcostlabels
+  annotations:
+    description: "Requires resources to have cost allocation labels"
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sRequiredCostLabels
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            labels:
+              type: array
+              items:
+                type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8srequiredcostlabels
+
+        violation[{"msg": msg, "details": {"missing_labels": missing}}] {
+          provided := {label | input.review.object.metadata.labels[label]}
+          required := {label | label := input.parameters.labels[_]}
+          missing := required - provided
+          count(missing) > 0
+          msg := sprintf("Resource is missing required cost allocation labels: %v", [missing])
+        }
+
+---
+# Constraint requiring cost labels on namespaced resources
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequiredCostLabels
+metadata:
+  name: require-cost-labels
+spec:
+  enforcementAction: dryrun  # Change to 'deny' to enforce
+  match:
+    kinds:
+      - apiGroups: ["apps"]
+        kinds: ["Deployment", "StatefulSet", "DaemonSet"]
+      - apiGroups: ["batch"]
+        kinds: ["Job", "CronJob"]
+    excludedNamespaces:
+      - kube-system
+      - kube-public
+      - kube-node-lease
+      - opencost
+      - monitoring
+  parameters:
+    labels:
+      - "team"
+      - "application"
+      - "environment"

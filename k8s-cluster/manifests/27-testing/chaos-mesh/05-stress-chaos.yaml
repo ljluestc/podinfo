@@ -1,0 +1,91 @@
+---
+# StressChaos: CPU stress experiment
+apiVersion: chaos-mesh.org/v1alpha1
+kind: StressChaos
+metadata:
+  name: cpu-stress-experiment
+  namespace: chaos-testing
+spec:
+  mode: one
+  selector:
+    namespaces:
+      - chaos-target
+    labelSelectors:
+      "chaos-test": "enabled"
+  stressors:
+    cpu:
+      workers: 2
+      load: 90
+  duration: "5m"
+
+---
+# StressChaos: Memory stress experiment
+apiVersion: chaos-mesh.org/v1alpha1
+kind: StressChaos
+metadata:
+  name: memory-stress-experiment
+  namespace: chaos-testing
+spec:
+  mode: one
+  selector:
+    namespaces:
+      - chaos-target
+    labelSelectors:
+      "chaos-test": "enabled"
+  stressors:
+    memory:
+      workers: 1
+      size: "512MB"
+  duration: "5m"
+
+---
+# StressChaos: Combined CPU and Memory stress
+apiVersion: chaos-mesh.org/v1alpha1
+kind: StressChaos
+metadata:
+  name: combined-stress-experiment
+  namespace: chaos-testing
+spec:
+  mode: fixed-percent
+  value: "30"
+  selector:
+    namespaces:
+      - chaos-target
+    labelSelectors:
+      "chaos-test": "enabled"
+  stressors:
+    cpu:
+      workers: 2
+      load: 80
+    memory:
+      workers: 1
+      size: "256MB"
+  duration: "10m"
+
+---
+# Schedule for regular stress testing
+apiVersion: chaos-mesh.org/v1alpha1
+kind: Schedule
+metadata:
+  name: scheduled-stress-chaos
+  namespace: chaos-testing
+spec:
+  schedule: "0 1 * * 1"  # Every Monday at 1 AM
+  historyLimit: 5
+  concurrencyPolicy: Forbid
+  type: StressChaos
+  stressChaos:
+    mode: one
+    selector:
+      namespaces:
+        - chaos-target
+      labelSelectors:
+        chaos-test: enabled
+    stressors:
+      cpu:
+        workers: 1
+        load: 70
+      memory:
+        workers: 1
+        size: "128MB"
+    duration: "3m"

@@ -1,0 +1,193 @@
+---
+# ConfigMap for Trivy configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trivy-config
+  namespace: security-testing
+data:
+  trivy.yaml: |
+    # Trivy configuration
+    severity:
+      - CRITICAL
+      - HIGH
+      - MEDIUM
+    vulnerability:
+      type:
+        - os
+        - library
+    scan:
+      skip-dirs:
+        - /var/lib/docker
+        - /var/lib/containerd
+    output:
+      format: json
+
+---
+# ServiceAccount for Trivy
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: trivy-scanner
+  namespace: security-testing
+
+---
+# ClusterRole for Trivy
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: trivy-scanner
+rules:
+- apiGroups: [""]
+  resources: ["pods", "nodes"]
+  verbs: ["get", "list"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "daemonsets", "statefulsets", "replicasets"]
+  verbs: ["get", "list"]
+- apiGroups: ["batch"]
+  resources: ["jobs", "cronjobs"]
+  verbs: ["get", "list"]
+
+---
+# ClusterRoleBinding for Trivy
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: trivy-scanner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: trivy-scanner
+subjects:
+- kind: ServiceAccount
+  name: trivy-scanner
+  namespace: security-testing
+
+---
+# Job to scan cluster with Trivy
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: trivy-cluster-scan
+  namespace: security-testing
+spec:
+  template:
+    metadata:
+      labels:
+        app: trivy
+        scan-type: cluster
+    spec:
+      serviceAccountName: trivy-scanner
+      restartPolicy: Never
+      containers:
+      - name: trivy
+        image: aquasec/trivy:latest
+        command:
+        - trivy
+        args:
+        - cluster
+        - --report
+        - summary
+        - --severity
+        - CRITICAL,HIGH
+        - --format
+        - json
+        - --output
+        - /tmp/trivy-cluster-report.json
+        volumeMounts:
+        - name: trivy-cache
+          mountPath: /root/.cache/
+        - name: trivy-config
+          mountPath: /etc/trivy
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+          requests:
+            cpu: 500m
+            memory: 512Mi
+      volumes:
+      - name: trivy-cache
+        emptyDir: {}
+      - name: trivy-config
+        configMap:
+          name: trivy-config
+
+---
+# CronJob for scheduled Trivy image scans
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: trivy-scheduled-scan
+  namespace: security-testing
+spec:
+  schedule: "0 1 * * *"  # Daily at 1 AM
+  successfulJobsHistoryLimit: 7
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: trivy
+            scheduled: "true"
+        spec:
+          serviceAccountName: trivy-scanner
+          restartPolicy: OnFailure
+          containers:
+          - name: trivy
+            image: aquasec/trivy:latest
+            command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              echo "Starting Trivy vulnerability scan..."
+
+              # Update vulnerability database
+              trivy image --download-db-only
+
+              # Scan cluster
+              trivy cluster \
+                --report summary \
+                --severity CRITICAL,HIGH,MEDIUM \
+                --format json \
+                --output /tmp/trivy-results.json \
+                all
+
+              # Display summary
+              echo "=== Trivy Scan Results Summary ==="
+              cat /tmp/trivy-results.json | jq -r '.Summary'
+
+              # Check for critical vulnerabilities
+              CRITICAL_COUNT=$(cat /tmp/trivy-results.json | jq -r '.Summary.CriticalCount // 0')
+              HIGH_COUNT=$(cat /tmp/trivy-results.json | jq -r '.Summary.HighCount // 0')
+
+              echo "Critical vulnerabilities: $CRITICAL_COUNT"
+              echo "High vulnerabilities: $HIGH_COUNT"
+
+              if [ "$CRITICAL_COUNT" -gt "0" ]; then
+                echo "ERROR: Critical vulnerabilities detected!"
+                exit 1
+              fi
+
+              echo "Vulnerability scan completed"
+            volumeMounts:
+            - name: trivy-cache
+              mountPath: /root/.cache/
+            - name: trivy-config
+              mountPath: /etc/trivy
+            resources:
+              limits:
+                cpu: 1000m
+                memory: 1Gi
+              requests:
+                cpu: 500m
+                memory: 512Mi
+          volumes:
+          - name: trivy-cache
+            emptyDir: {}
+          - name: trivy-config
+            configMap:
+              name: trivy-config

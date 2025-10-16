@@ -36,7 +36,17 @@
       "Bash(/dev/null)",
       "Bash(echo \"✓ $file is valid\")",
       "Bash(echo:*)",
-      "Bash(python3 -c \"import yaml; yaml.safe_load_all(open(''$file''))\")"
+      "Bash(python3 -c \"import yaml; yaml.safe_load_all(open(''$file''))\")",
+      "Bash(python3 -c \"import yaml; yaml.safe_load_all(open(''''$file''''))\")",
+      "Bash(./deploy.sh:*)",
+      "Bash(timeout 30 npx -y task-master-ai get-task:*)",
+      "Bash(./08-test-suite.sh:*)",
+      "Bash(timeout:*)",
+      "Read(//home/calelin/dev/**)",
+      "Bash(./validate-recipes.sh:*)",
+      "Bash(bash:*)",
+      "Bash(grep:*)",
+      "Bash(./quick-validate.sh:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

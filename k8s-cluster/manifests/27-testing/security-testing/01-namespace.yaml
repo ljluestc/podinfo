@@ -1,0 +1,11 @@
+---
+# Namespace for security testing
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: security-testing
+  labels:
+    name: security-testing
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged

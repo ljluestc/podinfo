@@ -1,0 +1,21 @@
+---
+# Namespace for Chaos Mesh
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: chaos-testing
+  labels:
+    name: chaos-testing
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: privileged
+    pod-security.kubernetes.io/warn: privileged
+
+---
+# Namespace for chaos experiments target
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: chaos-target
+  labels:
+    name: chaos-target
+    chaos-mesh.org/inject: enabled

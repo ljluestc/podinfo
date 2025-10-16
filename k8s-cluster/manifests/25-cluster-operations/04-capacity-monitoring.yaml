@@ -1,0 +1,432 @@
+---
+# Capacity Monitoring and Forecasting
+# Monitors cluster capacity and provides forecasting alerts
+
+# PrometheusRule for capacity alerts
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: capacity-monitoring-rules
+  namespace: monitoring
+  labels:
+    prometheus: kube-prometheus
+    app: capacity-monitoring
+spec:
+  groups:
+  - name: capacity.node
+    interval: 5m
+    rules:
+    # Node capacity alerts
+    - alert: NodeCPUCapacityHigh
+      expr: |
+        (
+          sum(rate(container_cpu_usage_seconds_total[5m])) by (node) /
+          sum(kube_node_status_allocatable{resource="cpu"}) by (node)
+        ) > 0.80
+      for: 30m
+      labels:
+        severity: warning
+        category: capacity
+        component: node
+      annotations:
+        summary: "Node {{ $labels.node }} CPU capacity at {{ $value | humanizePercentage }}"
+        description: "Node {{ $labels.node }} is using {{ $value | humanizePercentage }} of allocatable CPU"
+        runbook_url: "https://runbooks.example.com/node-capacity-high"
+        action: "Consider adding more nodes or scaling down workloads"
+
+    - alert: NodeCPUCapacityCritical
+      expr: |
+        (
+          sum(rate(container_cpu_usage_seconds_total[5m])) by (node) /
+          sum(kube_node_status_allocatable{resource="cpu"}) by (node)
+        ) > 0.90
+      for: 15m
+      labels:
+        severity: critical
+        category: capacity
+        component: node
+      annotations:
+        summary: "Node {{ $labels.node }} CPU capacity CRITICAL at {{ $value | humanizePercentage }}"
+        description: "Node {{ $labels.node }} is using {{ $value | humanizePercentage }} of allocatable CPU"
+        runbook_url: "https://runbooks.example.com/node-capacity-critical"
+        action: "Immediate action required: Scale up cluster or reduce load"
+
+    - alert: NodeMemoryCapacityHigh
+      expr: |
+        (
+          sum(container_memory_working_set_bytes) by (node) /
+          sum(kube_node_status_allocatable{resource="memory"}) by (node)
+        ) > 0.85
+      for: 30m
+      labels:
+        severity: warning
+        category: capacity
+        component: node
+      annotations:
+        summary: "Node {{ $labels.node }} memory capacity at {{ $value | humanizePercentage }}"
+        description: "Node {{ $labels.node }} is using {{ $value | humanizePercentage }} of allocatable memory"
+        runbook_url: "https://runbooks.example.com/node-capacity-high"
+
+    - alert: NodeMemoryCapacityCritical
+      expr: |
+        (
+          sum(container_memory_working_set_bytes) by (node) /
+          sum(kube_node_status_allocatable{resource="memory"}) by (node)
+        ) > 0.95
+      for: 15m
+      labels:
+        severity: critical
+        category: capacity
+        component: node
+      annotations:
+        summary: "Node {{ $labels.node }} memory capacity CRITICAL at {{ $value | humanizePercentage }}"
+        description: "Node {{ $labels.node }} is using {{ $value | humanizePercentage }} of allocatable memory"
+        runbook_url: "https://runbooks.example.com/node-capacity-critical"
+
+  - name: capacity.cluster
+    interval: 5m
+    rules:
+    # Cluster-wide capacity alerts
+    - alert: ClusterCPUCapacityLow
+      expr: |
+        (
+          sum(rate(container_cpu_usage_seconds_total[5m])) /
+          sum(kube_node_status_allocatable{resource="cpu"})
+        ) > 0.75
+      for: 1h
+      labels:
+        severity: warning
+        category: capacity
+        component: cluster
+      annotations:
+        summary: "Cluster CPU capacity at {{ $value | humanizePercentage }}"
+        description: "Cluster-wide CPU usage is {{ $value | humanizePercentage }} of total allocatable"
+        action: "Plan cluster expansion"
+
+    - alert: ClusterMemoryCapacityLow
+      expr: |
+        (
+          sum(container_memory_working_set_bytes) /
+          sum(kube_node_status_allocatable{resource="memory"})
+        ) > 0.80
+      for: 1h
+      labels:
+        severity: warning
+        category: capacity
+        component: cluster
+      annotations:
+        summary: "Cluster memory capacity at {{ $value | humanizePercentage }}"
+        description: "Cluster-wide memory usage is {{ $value | humanizePercentage }} of total allocatable"
+        action: "Plan cluster expansion"
+
+    # Pod capacity alerts
+    - alert: PodCapacityLow
+      expr: |
+        (
+          sum(kube_pod_status_phase{phase="Running"}) /
+          (sum(kube_node_status_allocatable{resource="pods"}) * 0.95)
+        ) > 0.85
+      for: 30m
+      labels:
+        severity: warning
+        category: capacity
+        component: cluster
+      annotations:
+        summary: "Cluster pod capacity at {{ $value | humanizePercentage }}"
+        description: "Cluster is using {{ $value | humanizePercentage }} of maximum pod capacity"
+        action: "Consider adding more nodes"
+
+    # Storage capacity alerts
+    - alert: PVCCapacityLow
+      expr: |
+        (
+          sum(kubelet_volume_stats_used_bytes) /
+          sum(kubelet_volume_stats_capacity_bytes)
+        ) > 0.85
+      for: 1h
+      labels:
+        severity: warning
+        category: capacity
+        component: storage
+      annotations:
+        summary: "PVC storage capacity at {{ $value | humanizePercentage }}"
+        description: "Persistent volume usage is {{ $value | humanizePercentage }} of total capacity"
+        action: "Plan storage expansion"
+
+  - name: capacity.forecast
+    interval: 1h
+    rules:
+    # Growth rate forecasting
+    - alert: CPUCapacityExhaustedIn7Days
+      expr: |
+        predict_linear(
+          (sum(rate(container_cpu_usage_seconds_total[1h])) /
+          sum(kube_node_status_allocatable{resource="cpu"}))[4h:1h],
+          7*24*3600
+        ) > 0.95
+      for: 2h
+      labels:
+        severity: warning
+        category: capacity
+        type: forecast
+        component: cluster
+      annotations:
+        summary: "Cluster CPU capacity predicted to be exhausted in 7 days"
+        description: "Based on current growth trends, cluster will reach 95% CPU capacity in 7 days"
+        current_usage: "{{ query \"sum(rate(container_cpu_usage_seconds_total[5m])) / sum(kube_node_status_allocatable{resource=\\\"cpu\\\"})\" | first | value | humanizePercentage }}"
+        action: "Plan cluster scaling"
+
+    - alert: MemoryCapacityExhaustedIn7Days
+      expr: |
+        predict_linear(
+          (sum(container_memory_working_set_bytes) /
+          sum(kube_node_status_allocatable{resource="memory"}))[4h:1h],
+          7*24*3600
+        ) > 0.95
+      for: 2h
+      labels:
+        severity: warning
+        category: capacity
+        type: forecast
+        component: cluster
+      annotations:
+        summary: "Cluster memory capacity predicted to be exhausted in 7 days"
+        description: "Based on current growth trends, cluster will reach 95% memory capacity in 7 days"
+        action: "Plan cluster scaling"
+
+    - alert: StorageCapacityExhaustedIn14Days
+      expr: |
+        predict_linear(
+          (sum(kubelet_volume_stats_used_bytes) /
+          sum(kubelet_volume_stats_capacity_bytes))[4h:1h],
+          14*24*3600
+        ) > 0.95
+      for: 4h
+      labels:
+        severity: warning
+        category: capacity
+        type: forecast
+        component: storage
+      annotations:
+        summary: "Storage capacity predicted to be exhausted in 14 days"
+        description: "Based on current growth trends, storage will reach 95% capacity in 14 days"
+        action: "Plan storage expansion"
+
+  - name: capacity.trends
+    interval: 1h
+    rules:
+    # Growth trends (for dashboard)
+    - record: cluster:cpu_usage:ratio
+      expr: |
+        sum(rate(container_cpu_usage_seconds_total[5m])) /
+        sum(kube_node_status_allocatable{resource="cpu"})
+
+    - record: cluster:memory_usage:ratio
+      expr: |
+        sum(container_memory_working_set_bytes) /
+        sum(kube_node_status_allocatable{resource="memory"})
+
+    - record: cluster:pod_usage:ratio
+      expr: |
+        sum(kube_pod_status_phase{phase="Running"}) /
+        sum(kube_node_status_allocatable{resource="pods"})
+
+    - record: node:cpu_usage:ratio
+      expr: |
+        sum(rate(container_cpu_usage_seconds_total[5m])) by (node) /
+        sum(kube_node_status_allocatable{resource="cpu"}) by (node)
+
+    - record: node:memory_usage:ratio
+      expr: |
+        sum(container_memory_working_set_bytes) by (node) /
+        sum(kube_node_status_allocatable{resource="memory"}) by (node)
+
+---
+# Grafana Dashboard ConfigMap for Capacity Monitoring
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: capacity-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  capacity-dashboard.json: |
+    {
+      "dashboard": {
+        "title": "Kubernetes Capacity Planning",
+        "tags": ["kubernetes", "capacity", "forecasting"],
+        "timezone": "browser",
+        "panels": [
+          {
+            "title": "Cluster CPU Capacity",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "cluster:cpu_usage:ratio",
+                "legendFormat": "Current Usage"
+              },
+              {
+                "expr": "predict_linear(cluster:cpu_usage:ratio[4h], 7*24*3600)",
+                "legendFormat": "7-day Forecast"
+              }
+            ],
+            "thresholds": [
+              {"value": 0.75, "colorMode": "critical"},
+              {"value": 0.90, "colorMode": "critical"}
+            ]
+          },
+          {
+            "title": "Cluster Memory Capacity",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "cluster:memory_usage:ratio",
+                "legendFormat": "Current Usage"
+              },
+              {
+                "expr": "predict_linear(cluster:memory_usage:ratio[4h], 7*24*3600)",
+                "legendFormat": "7-day Forecast"
+              }
+            ]
+          },
+          {
+            "title": "Node CPU Usage by Node",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "node:cpu_usage:ratio",
+                "legendFormat": "{{ node }}"
+              }
+            ]
+          },
+          {
+            "title": "Node Memory Usage by Node",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "node:memory_usage:ratio",
+                "legendFormat": "{{ node }}"
+              }
+            ]
+          },
+          {
+            "title": "Pod Capacity",
+            "type": "gauge",
+            "targets": [
+              {
+                "expr": "cluster:pod_usage:ratio"
+              }
+            ],
+            "thresholds": "0.75,0.85"
+          },
+          {
+            "title": "Capacity Recommendations",
+            "type": "table",
+            "targets": [
+              {
+                "expr": "ALERTS{alertname=~\".*Capacity.*\",alertstate=\"firing\"}"
+              }
+            ]
+          }
+        ]
+      }
+    }
+
+---
+# CronJob for capacity reporting
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: capacity-report
+  namespace: monitoring
+spec:
+  schedule: "0 9 * * 1"  # Weekly on Monday at 9 AM
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: capacity-reporter
+          containers:
+          - name: reporter
+            image: bitnami/kubectl:latest
+            command:
+            - /bin/bash
+            - -c
+            - |
+              #!/bin/bash
+
+              echo "===== Kubernetes Capacity Report ====="
+              echo "Generated: $(date)"
+              echo ""
+
+              echo "Cluster Overview:"
+              kubectl top nodes
+              echo ""
+
+              echo "Node Allocatable Resources:"
+              kubectl get nodes -o custom-columns=\
+              NAME:.metadata.name,\
+              CPU:.status.allocatable.cpu,\
+              MEMORY:.status.allocatable.memory,\
+              PODS:.status.allocatable.pods
+              echo ""
+
+              echo "Namespace Resource Quotas:"
+              kubectl get resourcequota -A
+              echo ""
+
+              echo "Top CPU Consuming Pods:"
+              kubectl top pods -A --sort-by=cpu | head -20
+              echo ""
+
+              echo "Top Memory Consuming Pods:"
+              kubectl top pods -A --sort-by=memory | head -20
+              echo ""
+
+              echo "Storage Capacity:"
+              kubectl get pv -o custom-columns=\
+              NAME:.metadata.name,\
+              CAPACITY:.spec.capacity.storage,\
+              CLAIM:.spec.claimRef.name
+
+              echo ""
+              echo "===== End Report ====="
+          restartPolicy: OnFailure
+
+---
+# ServiceAccount for capacity reporter
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: capacity-reporter
+  namespace: monitoring
+
+---
+# ClusterRole for capacity reporter
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: capacity-reporter
+rules:
+- apiGroups: [""]
+  resources: ["nodes", "pods", "persistentvolumes", "persistentvolumeclaims", "resourcequotas"]
+  verbs: ["get", "list"]
+- apiGroups: ["metrics.k8s.io"]
+  resources: ["nodes", "pods"]
+  verbs: ["get", "list"]
+
+---
+# ClusterRoleBinding for capacity reporter
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: capacity-reporter
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: capacity-reporter
+subjects:
+- kind: ServiceAccount
+  name: capacity-reporter
+  namespace: monitoring

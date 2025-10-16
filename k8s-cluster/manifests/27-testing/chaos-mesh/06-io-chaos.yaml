@@ -1,0 +1,90 @@
+---
+# IOChaos: Disk read/write delay
+apiVersion: chaos-mesh.org/v1alpha1
+kind: IOChaos
+metadata:
+  name: io-delay-experiment
+  namespace: chaos-testing
+spec:
+  action: latency
+  mode: one
+  selector:
+    namespaces:
+      - chaos-target
+    labelSelectors:
+      "chaos-test": "enabled"
+  volumePath: /var/lib/app
+  path: "/var/lib/app/**/*"
+  delay: "500ms"
+  percent: 50
+  duration: "5m"
+
+---
+# IOChaos: Disk I/O errors
+apiVersion: chaos-mesh.org/v1alpha1
+kind: IOChaos
+metadata:
+  name: io-error-experiment
+  namespace: chaos-testing
+spec:
+  action: fault
+  mode: one
+  selector:
+    namespaces:
+      - chaos-target
+    labelSelectors:
+      "chaos-test": "enabled"
+  volumePath: /var/lib/app
+  path: "/var/lib/app/**/*"
+  errno: 5  # EIO error
+  percent: 10
+  duration: "3m"
+
+---
+# IOChaos: Disk read performance degradation
+apiVersion: chaos-mesh.org/v1alpha1
+kind: IOChaos
+metadata:
+  name: io-read-slow-experiment
+  namespace: chaos-testing
+spec:
+  action: latency
+  mode: fixed-percent
+  value: "25"
+  selector:
+    namespaces:
+      - chaos-target
+    labelSelectors:
+      "chaos-test": "enabled"
+  volumePath: /data
+  path: "/data/**/*.db"
+  delay: "1s"
+  percent: 80
+  duration: "5m"
+  methods:
+    - read
+    - readv
+
+---
+# IOChaos: Disk write performance degradation
+apiVersion: chaos-mesh.org/v1alpha1
+kind: IOChaos
+metadata:
+  name: io-write-slow-experiment
+  namespace: chaos-testing
+spec:
+  action: latency
+  mode: one
+  selector:
+    namespaces:
+      - chaos-target
+    labelSelectors:
+      "chaos-test": "enabled"
+  volumePath: /data
+  path: "/data/**/*"
+  delay: "2s"
+  percent: 70
+  duration: "3m"
+  methods:
+    - write
+    - writev

@@ -1,0 +1,417 @@
+---
+# Cost Management Testing Manifests
+# This file contains test cases to validate cost tracking functionality
+
+# Test Namespace with Budget
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cost-test
+  labels:
+    team: test-team
+    environment: testing
+    cost-tracking: enabled
+  annotations:
+    cost-allocation/team: "test-team"
+    cost-allocation/monthly-budget: "100"
+    cost-allocation/budget-code: "TEST-2024"
+    description: "Namespace for testing cost management features"
+
+---
+# Test Deployment with Proper Cost Labels
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cost-test-app-optimized
+  namespace: cost-test
+  labels:
+    app: cost-test-optimized
+    team: test-team
+    application: test-app
+    environment: testing
+    cost-center: CC-TEST
+  annotations:
+    cost-allocation/team: "test-team"
+    cost-allocation/owner: "test-team@example.com"
+    cost-allocation/monthly-budget: "50"
+    description: "Optimized test deployment with appropriate resource requests"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: cost-test-optimized
+  template:
+    metadata:
+      labels:
+        app: cost-test-optimized
+        team: test-team
+        application: test-app
+        environment: testing
+    spec:
+      containers:
+        - name: app
+          image: nginx:alpine
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+          ports:
+            - containerPort: 80
+
+---
+# Test Deployment: Over-Provisioned (should trigger right-sizing alert)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cost-test-app-overprovisioned
+  namespace: cost-test
+  labels:
+    app: cost-test-overprovisioned
+    team: test-team
+    application: test-app-heavy
+    environment: testing
+    cost-center: CC-TEST
+  annotations:
+    cost-allocation/team: "test-team"
+    description: "Over-provisioned deployment to test right-sizing recommendations"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cost-test-overprovisioned
+  template:
+    metadata:
+      labels:
+        app: cost-test-overprovisioned
+        team: test-team
+        application: test-app-heavy
+    spec:
+      containers:
+        - name: app
+          image: nginx:alpine
+          resources:
+            requests:
+              cpu: "1000m"    # Over-provisioned
+              memory: "2Gi"   # Over-provisioned
+            limits:
+              cpu: "2000m"
+              memory: "4Gi"
+          ports:
+            - containerPort: 80
+
+---
+# Test Deployment: Zero Replicas (should trigger idle resource alert)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cost-test-app-idle
+  namespace: cost-test
+  labels:
+    app: cost-test-idle
+    team: test-team
+    application: test-app-idle
+    environment: testing
+  annotations:
+    description: "Idle deployment scaled to 0 for testing cleanup detection"
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: cost-test-idle
+  template:
+    metadata:
+      labels:
+        app: cost-test-idle
+    spec:
+      containers:
+        - name: app
+          image: nginx:alpine
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+
+---
+# Test PVC: Unused (should trigger cleanup alert)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cost-test-unused-pvc
+  namespace: cost-test
+  labels:
+    team: test-team
+  annotations:
+    description: "Unused PVC for testing idle storage detection"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: standard
+
+---
+# Test Job: Completed (should trigger cleanup after threshold)
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cost-test-completed-job
+  namespace: cost-test
+  labels:
+    team: test-team
+    application: test-job
+  annotations:
+    description: "Completed job for testing job cleanup"
+spec:
+  ttlSecondsAfterFinished: 3600  # 1 hour for testing
+  template:
+    metadata:
+      labels:
+        team: test-team
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: test
+          image: busybox
+          command: ["sh", "-c", "echo 'Job completed successfully'; sleep 5"]
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "32Mi"
+
+---
+# Test CronJob: Right-sizing Test
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cost-test-rightsizing-check
+  namespace: cost-test
+  labels:
+    app: cost-test
+  annotations:
+    description: "Test CronJob to verify right-sizing recommendations"
+spec:
+  schedule: "*/30 * * * *"  # Every 30 minutes
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            team: test-team
+        spec:
+          serviceAccountName: default
+          restartPolicy: Never
+          containers:
+            - name: check-rightsizing
+              image: curlimages/curl:latest
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  echo "Checking OpenCost for right-sizing recommendations..."
+                  curl -s http://opencost.opencost.svc:9003/allocation/compute?window=1h || echo "Could not reach OpenCost"
+              resources:
+                requests:
+                  cpu: "10m"
+                  memory: "32Mi"
+                limits:
+                  cpu: "50m"
+                  memory: "64Mi"
+
+---
+# Test Service for cost tracking
+apiVersion: v1
+kind: Service
+metadata:
+  name: cost-test-service
+  namespace: cost-test
+  labels:
+    app: cost-test-optimized
+    team: test-team
+spec:
+  selector:
+    app: cost-test-optimized
+  ports:
+    - port: 80
+      targetPort: 80
+  type: ClusterIP
+
+---
+# Test ResourceQuota with cost tracking
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: cost-test-quota
+  namespace: cost-test
+  labels:
+    team: test-team
+    cost-center: CC-TEST
+  annotations:
+    cost-allocation/team: "test-team"
+    cost-allocation/monthly-budget: "100"
+spec:
+  hard:
+    requests.cpu: "4"
+    requests.memory: "8Gi"
+    limits.cpu: "8"
+    limits.memory: "16Gi"
+    pods: "20"
+    services: "5"
+    persistentvolumeclaims: "5"
+
+---
+# Validation Job: Test Cost Tracking
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cost-validation-test
+  namespace: cost-test
+  labels:
+    test: cost-validation
+  annotations:
+    description: "Validates cost tracking functionality"
+spec:
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        test: cost-validation
+    spec:
+      serviceAccountName: default
+      restartPolicy: Never
+      containers:
+        - name: validator
+          image: curlimages/curl:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              echo "==================================="
+              echo "Cost Management Validation Tests"
+              echo "==================================="
+              echo ""
+
+              OPENCOST_URL="http://opencost.opencost.svc:9003"
+
+              echo "Test 1: Check OpenCost API accessibility"
+              if curl -f -s "$OPENCOST_URL/healthz" > /dev/null; then
+                  echo "✓ OpenCost API is accessible"
+              else
+                  echo "✗ OpenCost API is not accessible"
+                  exit 1
+              fi
+              echo ""
+
+              echo "Test 2: Query cost data for test namespace"
+              COST_DATA=$(curl -s "$OPENCOST_URL/allocation/compute?window=1h&aggregate=namespace&filterNamespaces=cost-test")
+              if echo "$COST_DATA" | grep -q "cost-test"; then
+                  echo "✓ Cost data available for cost-test namespace"
+                  echo "$COST_DATA"
+              else
+                  echo "⚠ No cost data yet for cost-test namespace (may need time to collect)"
+              fi
+              echo ""
+
+              echo "Test 3: Query cost by team label"
+              TEAM_COST=$(curl -s "$OPENCOST_URL/allocation/compute?window=1h&aggregate=label:team")
+              if echo "$TEAM_COST" | grep -q "test-team"; then
+                  echo "✓ Cost allocation by team is working"
+              else
+                  echo "⚠ Team cost data not yet available"
+              fi
+              echo ""
+
+              echo "Test 4: Check Prometheus metrics"
+              if curl -f -s "$OPENCOST_URL/metrics" | grep -q "opencost"; then
+                  echo "✓ OpenCost Prometheus metrics are being exposed"
+              else
+                  echo "✗ OpenCost metrics not available"
+              fi
+              echo ""
+
+              echo "==================================="
+              echo "Validation Complete"
+              echo "==================================="
+              echo ""
+              echo "Note: Some tests may show warnings if the system"
+              echo "hasn't collected enough data yet. Wait 5-10 minutes"
+              echo "and check the Grafana dashboards."
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "32Mi"
+            limits:
+              cpu: "50m"
+              memory: "64Mi"
+
+---
+# ConfigMap with test validation script
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cost-test-scripts
+  namespace: cost-test
+  labels:
+    app: cost-test
+data:
+  validate-costs.sh: |
+    #!/bin/bash
+    # Cost validation script
+
+    echo "Validating cost tracking setup..."
+    echo ""
+
+    # Check OpenCost deployment
+    echo "1. Checking OpenCost deployment..."
+    kubectl get deployment -n opencost opencost
+    echo ""
+
+    # Check cost allocation labels
+    echo "2. Checking cost allocation labels on test deployments..."
+    kubectl get deployment -n cost-test -o json | \
+      jq -r '.items[] | "\(.metadata.name): team=\(.metadata.labels.team // "missing"), app=\(.metadata.labels.application // "missing")"'
+    echo ""
+
+    # Query OpenCost API
+    echo "3. Querying OpenCost API..."
+    kubectl port-forward -n opencost svc/opencost 9003:9003 &
+    PF_PID=$!
+    sleep 3
+
+    echo "Cost by namespace:"
+    curl -s http://localhost:9003/allocation/compute?window=1h&aggregate=namespace | jq .
+
+    echo ""
+    echo "Cost by team:"
+    curl -s http://localhost:9003/allocation/compute?window=1h&aggregate=label:team | jq .
+
+    kill $PF_PID
+    echo ""
+
+    # Check for alerts
+    echo "4. Checking cost alerts..."
+    kubectl get prometheusrule -n opencost cost-alerts
+    echo ""
+
+    # Check dashboards
+    echo "5. Checking Grafana dashboards..."
+    kubectl get configmap -n opencost cost-dashboards
+    echo ""
+
+    echo "Validation complete!"
+    echo "Access Grafana to view cost dashboards:"
+    echo "kubectl port-forward -n monitoring svc/kube-prometheus-stack-grafana 3000:80"
+
+  cleanup-tests.sh: |
+    #!/bin/bash
+    # Cleanup test resources
+
+    echo "Cleaning up cost management test resources..."
+    kubectl delete namespace cost-test --ignore-not-found=true
+    echo "✓ Test resources cleaned up"

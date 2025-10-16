@@ -1,0 +1,210 @@
+---
+# Split-horizon DNS configuration using CoreDNS
+# This configmap adds conditional forwarding based on query source
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns-split-horizon
+  namespace: kube-system
+  labels:
+    app: coredns
+    app.kubernetes.io/name: coredns
+    component: split-horizon
+data:
+  # Split-horizon configuration for different network segments
+  split-horizon.server: |
+    # Internal cluster DNS zone - only accessible from within cluster
+    internal.cluster.local:53 {
+        errors
+        cache 30
+
+        # Only respond to queries from internal pod networks
+        acl {
+            allow net 10.0.0.0/8
+            allow net 172.16.0.0/12
+            allow net 192.168.0.0/16
+            block
+        }
+
+        # Serve internal records
+        kubernetes cluster.local in-addr.arpa ip6.arpa {
+            pods insecure
+            fallthrough in-addr.arpa ip6.arpa
+            ttl 30
+        }
+
+        # Forward unresolved to upstream
+        forward . 8.8.8.8 8.8.4.4
+
+        log
+        reload
+    }
+
+    # External DNS zone - different records for external access
+    external.cluster.local:53 {
+        errors
+        cache 30
+
+        # Respond to all queries (external facing)
+
+        # Load custom external zone file
+        file /etc/coredns/zones/external.zone external.cluster.local
+
+        # Forward unresolved to upstream
+        forward . 8.8.8.8 8.8.4.4
+
+        log
+        reload
+    }
+
+    # Public service domain with split responses
+    podinfo.local:53 {
+        errors
+        cache 30
+
+        # Use ACL to provide different responses
+        # Internal clients get internal IPs
+        acl internal {
+            allow net 10.0.0.0/8
+            allow net 172.16.0.0/12
+            allow net 192.168.0.0/16
+        }
+
+        # Rewrite based on source
+        template IN A podinfo.local {
+            match "^podinfo\.local\.$"
+            answer "{{ .Name }} 60 IN A 10.96.0.100"  # Internal IP
+            fallthrough
+        }
+
+        file /etc/coredns/zones/podinfo-internal.zone {
+            filter acl internal
+        }
+
+        file /etc/coredns/zones/podinfo-external.zone
+
+        log
+        reload
+    }
+---
+# Internal zone file for split-horizon DNS
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns-internal-zones
+  namespace: kube-system
+  labels:
+    app: coredns
+    zone-type: internal
+data:
+  podinfo-internal.zone: |
+    $ORIGIN podinfo.local.
+    $TTL 300
+    @       IN      SOA     ns.podinfo.local. admin.podinfo.local. (
+                            2025101301 ; Serial
+                            3600       ; Refresh
+                            1800       ; Retry
+                            604800     ; Expire
+                            300 )      ; Minimum TTL
+
+    @       IN      NS      ns.podinfo.local.
+    ns      IN      A       10.96.0.10
+
+    ; Internal service endpoints (ClusterIP)
+    app     IN      A       10.96.0.100
+    api     IN      A       10.96.0.101
+    web     IN      A       10.96.0.102
+
+    ; Internal load balancer
+    lb      IN      A       10.96.0.200
+
+    ; Headless service for direct pod access
+    pod-0   IN      A       10.244.0.10
+    pod-1   IN      A       10.244.0.11
+    pod-2   IN      A       10.244.0.12
+
+    ; SRV records for service discovery
+    _http._tcp  IN  SRV  10 50 9898 app.podinfo.local.
+    _grpc._tcp  IN  SRV  10 50 9999 api.podinfo.local.
+
+  external.zone: |
+    $ORIGIN external.cluster.local.
+    $TTL 300
+    @       IN      SOA     ns.external.cluster.local. admin.external.cluster.local. (
+                            2025101301
+                            3600
+                            1800
+                            604800
+                            300 )
+
+    @       IN      NS      ns.external.cluster.local.
+
+    ; External database and services
+    db      IN      A       203.0.113.10
+    cache   IN      A       203.0.113.20
+---
+# External zone file for split-horizon DNS
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns-external-zones
+  namespace: kube-system
+  labels:
+    app: coredns
+    zone-type: external
+data:
+  podinfo-external.zone: |
+    $ORIGIN podinfo.local.
+    $TTL 300
+    @       IN      SOA     ns.podinfo.local. admin.podinfo.local. (
+                            2025101301 ; Serial
+                            3600       ; Refresh
+                            1800       ; Retry
+                            604800     ; Expire
+                            300 )      ; Minimum TTL
+
+    @       IN      NS      ns.podinfo.local.
+    ns      IN      A       203.0.113.1
+
+    ; External-facing endpoints (LoadBalancer or Ingress IPs)
+    app     IN      A       203.0.113.100
+    api     IN      A       203.0.113.101
+    web     IN      A       203.0.113.102
+
+    ; External load balancer
+    lb      IN      A       203.0.113.200
+
+    ; CDN endpoints
+    cdn     IN      CNAME   cdn.example.com.
+
+    ; SRV records for external service discovery
+    _http._tcp  IN  SRV  10 50 443 app.podinfo.local.
+    _grpc._tcp  IN  SRV  10 50 443 api.podinfo.local.
+---
+# Deployment to mount the split-horizon zone files
+# This is a patch to the CoreDNS deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coredns
+  namespace: kube-system
+spec:
+  template:
+    spec:
+      volumes:
+        - name: internal-zones
+          configMap:
+            name: coredns-internal-zones
+        - name: external-zones
+          configMap:
+            name: coredns-external-zones
+      containers:
+        - name: coredns
+          volumeMounts:
+            - name: internal-zones
+              mountPath: /etc/coredns/zones/internal
+              readOnly: true
+            - name: external-zones
+              mountPath: /etc/coredns/zones/external
+              readOnly: true

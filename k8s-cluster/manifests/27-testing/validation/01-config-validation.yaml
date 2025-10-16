@@ -1,0 +1,347 @@
+---
+# Namespace for validation
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: validation-testing
+  labels:
+    name: validation-testing
+
+---
+# ConfigMap with validation scripts
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: validation-scripts
+  namespace: validation-testing
+data:
+  validate-manifests.sh: |
+    #!/bin/bash
+    set -e
+
+    echo "=== Validating Kubernetes Manifests ==="
+
+    FAILED=0
+
+    # Find all YAML files
+    find /manifests -name "*.yaml" -o -name "*.yml" | while read file; do
+      echo "Validating: $file"
+
+      # Check YAML syntax
+      if ! python3 -c "import yaml; yaml.safe_load_all(open('$file'))" 2>/dev/null; then
+        echo "✗ Invalid YAML syntax: $file"
+        FAILED=$((FAILED + 1))
+        continue
+      fi
+
+      # Dry-run apply
+      if ! kubectl apply --dry-run=server -f "$file" 2>&1; then
+        echo "✗ Validation failed: $file"
+        FAILED=$((FAILED + 1))
+        continue
+      fi
+
+      echo "✓ Valid: $file"
+    done
+
+    if [ "$FAILED" -gt "0" ]; then
+      echo "✗ $FAILED files failed validation"
+      exit 1
+    fi
+
+    echo "✓ All manifests valid"
+
+  validate-policies.sh: |
+    #!/bin/bash
+    set -e
+
+    echo "=== Validating OPA Policies ==="
+
+    # Check if OPA/Gatekeeper is installed
+    if ! kubectl get constrainttemplates 2>/dev/null; then
+      echo "OPA Gatekeeper not installed, skipping policy validation"
+      exit 0
+    fi
+
+    # List all constraints
+    echo "Active Constraints:"
+    kubectl get constraints --all-namespaces
+
+    # Check for constraint violations
+    echo "Checking for violations..."
+    VIOLATIONS=0
+
+    for ct in $(kubectl get constrainttemplates -o name); do
+      CONSTRAINT_TYPE=$(echo $ct | cut -d'/' -f2)
+
+      for constraint in $(kubectl get $CONSTRAINT_TYPE -A -o name 2>/dev/null); do
+        CONSTRAINT_NAME=$(echo $constraint | cut -d'/' -f2)
+
+        # Check violations
+        VIOLATION_COUNT=$(kubectl get $constraint -o jsonpath='{.status.totalViolations}' 2>/dev/null || echo "0")
+
+        if [ "$VIOLATION_COUNT" != "0" ] && [ "$VIOLATION_COUNT" != "null" ]; then
+          echo "✗ Constraint $CONSTRAINT_NAME has $VIOLATION_COUNT violations"
+          kubectl get $constraint -o jsonpath='{.status.violations}' | jq '.'
+          VIOLATIONS=$((VIOLATIONS + VIOLATION_COUNT))
+        fi
+      done
+    done
+
+    if [ "$VIOLATIONS" -gt "0" ]; then
+      echo "✗ Total violations: $VIOLATIONS"
+      exit 1
+    fi
+
+    echo "✓ No policy violations found"
+
+  validate-pod-security.sh: |
+    #!/bin/bash
+    set -e
+
+    echo "=== Validating Pod Security Standards ==="
+
+    # Check namespaces with pod security labels
+    echo "Namespaces with Pod Security Standards:"
+    kubectl get namespaces -o json | \
+      jq -r '.items[] | select(.metadata.labels["pod-security.kubernetes.io/enforce"]) |
+      "\(.metadata.name): \(.metadata.labels["pod-security.kubernetes.io/enforce"])"'
+
+    # Validate pods against security standards
+    echo ""
+    echo "Checking for privileged pods..."
+    PRIVILEGED=$(kubectl get pods -A -o json | \
+      jq -r '.items[] | select(.spec.containers[].securityContext.privileged == true) |
+      "\(.metadata.namespace)/\(.metadata.name)"' | wc -l)
+
+    echo "Privileged pods found: $PRIVILEGED"
+
+    # Check for pods running as root
+    echo ""
+    echo "Checking for pods running as root..."
+    AS_ROOT=$(kubectl get pods -A -o json | \
+      jq -r '.items[] | select(.spec.containers[].securityContext.runAsUser == 0 or
+      .spec.securityContext.runAsUser == 0) |
+      "\(.metadata.namespace)/\(.metadata.name)"' | wc -l)
+
+    echo "Pods running as root: $AS_ROOT"
+
+    # Check for pods with host namespaces
+    echo ""
+    echo "Checking for pods with host namespaces..."
+    HOST_NS=$(kubectl get pods -A -o json | \
+      jq -r '.items[] | select(.spec.hostNetwork == true or .spec.hostPID == true or
+      .spec.hostIPC == true) |
+      "\(.metadata.namespace)/\(.metadata.name)"' | wc -l)
+
+    echo "Pods with host namespaces: $HOST_NS"
+
+    echo "✓ Pod security validation complete"
+
+  validate-rbac.sh: |
+    #!/bin/bash
+    set -e
+
+    echo "=== Validating RBAC Configuration ==="
+
+    # Check for overly permissive cluster roles
+    echo "Checking for cluster-admin bindings..."
+    kubectl get clusterrolebindings -o json | \
+      jq -r '.items[] | select(.roleRef.name == "cluster-admin") |
+      "ClusterRoleBinding: \(.metadata.name) -> Subjects: \(.subjects)"'
+
+    # Check for wildcard permissions
+    echo ""
+    echo "Checking for wildcard permissions..."
+    kubectl get clusterroles -o json | \
+      jq -r '.items[] | select(.rules[].verbs[] == "*" or .rules[].resources[] == "*") |
+      .metadata.name' | head -10
+
+    # Check service accounts without role bindings
+    echo ""
+    echo "Checking for service accounts without bindings..."
+    # This is a simplified check
+    SA_COUNT=$(kubectl get sa -A --no-headers | wc -l)
+    RB_COUNT=$(kubectl get rolebindings,clusterrolebindings -A --no-headers | wc -l)
+    echo "Service accounts: $SA_COUNT"
+    echo "Role bindings: $RB_COUNT"
+
+    echo "✓ RBAC validation complete"
+
+  validate-network-policies.sh: |
+    #!/bin/bash
+    set -e
+
+    echo "=== Validating Network Policies ==="
+
+    # List all network policies
+    echo "Network Policies:"
+    kubectl get networkpolicies -A
+
+    # Check namespaces without network policies
+    echo ""
+    echo "Namespaces without network policies:"
+    for ns in $(kubectl get namespaces -o jsonpath='{.items[*].metadata.name}'); do
+      NP_COUNT=$(kubectl get networkpolicies -n $ns --no-headers 2>/dev/null | wc -l)
+      if [ "$NP_COUNT" -eq "0" ] && [ "$ns" != "kube-system" ] && [ "$ns" != "kube-public" ]; then
+        echo "  - $ns"
+      fi
+    done
+
+    echo "✓ Network policy validation complete"
+
+---
+# CronJob for manifest validation
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: validate-manifests
+  namespace: validation-testing
+spec:
+  schedule: "0 */4 * * *"  # Every 4 hours
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: validation
+            type: manifests
+        spec:
+          serviceAccountName: default
+          restartPolicy: OnFailure
+          containers:
+          - name: validator
+            image: bitnami/kubectl:latest
+            command: ["/bin/bash", "/scripts/validate-manifests.sh"]
+            volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+            - name: manifests
+              mountPath: /manifests
+            resources:
+              limits:
+                cpu: 200m
+                memory: 256Mi
+              requests:
+                cpu: 100m
+                memory: 128Mi
+          volumes:
+          - name: scripts
+            configMap:
+              name: validation-scripts
+              defaultMode: 0755
+          - name: manifests
+            emptyDir: {}
+
+---
+# CronJob for policy validation
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: validate-policies
+  namespace: validation-testing
+spec:
+  schedule: "*/15 * * * *"  # Every 15 minutes
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: validation
+            type: policies
+        spec:
+          serviceAccountName: default
+          restartPolicy: OnFailure
+          containers:
+          - name: validator
+            image: bitnami/kubectl:latest
+            command: ["/bin/bash", "/scripts/validate-policies.sh"]
+            volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+            resources:
+              limits:
+                cpu: 200m
+                memory: 256Mi
+              requests:
+                cpu: 100m
+                memory: 128Mi
+          volumes:
+          - name: scripts
+            configMap:
+              name: validation-scripts
+              defaultMode: 0755
+
+---
+# CronJob for security validation
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: validate-security
+  namespace: validation-testing
+spec:
+  schedule: "0 */6 * * *"  # Every 6 hours
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: validation
+            type: security
+        spec:
+          serviceAccountName: default
+          restartPolicy: OnFailure
+          containers:
+          - name: pod-security-validator
+            image: bitnami/kubectl:latest
+            command: ["/bin/bash", "/scripts/validate-pod-security.sh"]
+            volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+            resources:
+              limits:
+                cpu: 200m
+                memory: 256Mi
+              requests:
+                cpu: 100m
+                memory: 128Mi
+          - name: rbac-validator
+            image: bitnami/kubectl:latest
+            command: ["/bin/bash", "/scripts/validate-rbac.sh"]
+            volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+            resources:
+              limits:
+                cpu: 200m
+                memory: 256Mi
+              requests:
+                cpu: 100m
+                memory: 128Mi
+          - name: network-validator
+            image: bitnami/kubectl:latest
+            command: ["/bin/bash", "/scripts/validate-network-policies.sh"]
+            volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+            resources:
+              limits:
+                cpu: 200m
+                memory: 256Mi
+              requests:
+                cpu: 100m
+                memory: 128Mi
+          volumes:
+          - name: scripts
+            configMap:
+              name: validation-scripts
+              defaultMode: 0755

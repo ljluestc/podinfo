@@ -1,0 +1,329 @@
+---
+# Namespace for disaster recovery testing
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dr-testing
+  labels:
+    name: dr-testing
+
+---
+# ServiceAccount for DR testing
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dr-test-runner
+  namespace: dr-testing
+
+---
+# ClusterRole for DR testing
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dr-test-runner
+rules:
+- apiGroups: [""]
+  resources: ["*"]
+  verbs: ["*"]
+- apiGroups: ["apps"]
+  resources: ["*"]
+  verbs: ["*"]
+- apiGroups: ["batch"]
+  resources: ["*"]
+  verbs: ["*"]
+- apiGroups: ["velero.io"]
+  resources: ["*"]
+  verbs: ["*"]
+
+---
+# ClusterRoleBinding for DR testing
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dr-test-runner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dr-test-runner
+subjects:
+- kind: ServiceAccount
+  name: dr-test-runner
+  namespace: dr-testing
+
+---
+# ConfigMap with DR test scripts
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dr-test-scripts
+  namespace: dr-testing
+data:
+  backup-test.sh: |
+    #!/bin/bash
+    set -e
+
+    echo "=== Disaster Recovery Backup Test ==="
+
+    # Create test namespace and resources
+    kubectl create namespace dr-test-backup || true
+    kubectl apply -f - <<EOF
+    apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: test-data
+      namespace: dr-test-backup
+    data:
+      message: "DR test data $(date)"
+    ---
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: test-app
+      namespace: dr-test-backup
+    spec:
+      replicas: 2
+      selector:
+        matchLabels:
+          app: test-app
+      template:
+        metadata:
+          labels:
+            app: test-app
+        spec:
+          containers:
+          - name: nginx
+            image: nginx:alpine
+            ports:
+            - containerPort: 80
+    EOF
+
+    # Wait for deployment
+    kubectl wait --for=condition=available --timeout=60s deployment/test-app -n dr-test-backup
+
+    # Create backup using Velero
+    velero backup create dr-test-backup-$(date +%s) \
+      --include-namespaces dr-test-backup \
+      --wait
+
+    # Verify backup
+    velero backup describe dr-test-backup-$(velero backup get -o name | grep dr-test-backup | head -1) \
+      | grep "Phase: Completed" || exit 1
+
+    echo "Backup test completed successfully"
+
+  restore-test.sh: |
+    #!/bin/bash
+    set -e
+
+    echo "=== Disaster Recovery Restore Test ==="
+
+    # Get latest backup
+    LATEST_BACKUP=$(velero backup get -o name | grep dr-test-backup | head -1)
+
+    if [ -z "$LATEST_BACKUP" ]; then
+      echo "No backup found to restore"
+      exit 1
+    fi
+
+    echo "Restoring from backup: $LATEST_BACKUP"
+
+    # Delete namespace to simulate disaster
+    kubectl delete namespace dr-test-backup --wait=true
+
+    # Restore from backup
+    velero restore create dr-test-restore-$(date +%s) \
+      --from-backup $LATEST_BACKUP \
+      --wait
+
+    # Verify restore
+    kubectl wait --for=condition=available --timeout=120s deployment/test-app -n dr-test-backup
+
+    # Verify data
+    kubectl get configmap test-data -n dr-test-backup -o jsonpath='{.data.message}' | grep "DR test data" || exit 1
+
+    echo "Restore test completed successfully"
+
+  etcd-backup-test.sh: |
+    #!/bin/bash
+    set -e
+
+    echo "=== ETCD Backup Test ==="
+
+    # Create snapshot
+    ETCDCTL_API=3 etcdctl snapshot save /tmp/etcd-snapshot-$(date +%s).db \
+      --endpoints=https://127.0.0.1:2379 \
+      --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+      --cert=/etc/kubernetes/pki/etcd/server.crt \
+      --key=/etc/kubernetes/pki/etcd/server.key
+
+    # Verify snapshot
+    ETCDCTL_API=3 etcdctl snapshot status /tmp/etcd-snapshot-*.db \
+      --write-out=table
+
+    echo "ETCD backup test completed successfully"
+
+  node-failure-test.sh: |
+    #!/bin/bash
+    set -e
+
+    echo "=== Node Failure Recovery Test ==="
+
+    # Create test workload
+    kubectl apply -f - <<EOF
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: node-failure-test
+      namespace: dr-testing
+    spec:
+      replicas: 3
+      selector:
+        matchLabels:
+          app: node-failure-test
+      template:
+        metadata:
+          labels:
+            app: node-failure-test
+        spec:
+          affinity:
+            podAntiAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+              - weight: 100
+                podAffinityTerm:
+                  labelSelector:
+                    matchLabels:
+                      app: node-failure-test
+                  topologyKey: kubernetes.io/hostname
+          containers:
+          - name: nginx
+            image: nginx:alpine
+            readinessProbe:
+              httpGet:
+                path: /
+                port: 80
+              initialDelaySeconds: 5
+              periodSeconds: 3
+    EOF
+
+    # Wait for deployment
+    kubectl wait --for=condition=available --timeout=120s deployment/node-failure-test -n dr-testing
+
+    # Get initial pod distribution
+    echo "Initial pod distribution:"
+    kubectl get pods -n dr-testing -o wide -l app=node-failure-test
+
+    # Simulate node failure by cordoning a node
+    NODE=$(kubectl get pods -n dr-testing -l app=node-failure-test -o jsonpath='{.items[0].spec.nodeName}')
+    echo "Simulating failure of node: $NODE"
+
+    kubectl cordon $NODE
+    kubectl delete pod -n dr-testing -l app=node-failure-test --field-selector spec.nodeName=$NODE
+
+    # Wait for pods to reschedule
+    sleep 30
+    kubectl wait --for=condition=available --timeout=120s deployment/node-failure-test -n dr-testing
+
+    # Verify recovery
+    echo "Pod distribution after node failure:"
+    kubectl get pods -n dr-testing -o wide -l app=node-failure-test
+
+    # Uncordon node
+    kubectl uncordon $NODE
+
+    echo "Node failure recovery test completed successfully"
+
+---
+# CronJob for scheduled DR testing
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dr-backup-test
+  namespace: dr-testing
+spec:
+  schedule: "0 5 * * 0"  # Weekly on Sunday at 5 AM
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: dr-test
+            test-type: backup
+        spec:
+          serviceAccountName: dr-test-runner
+          restartPolicy: OnFailure
+          containers:
+          - name: dr-test
+            image: bitnami/kubectl:latest
+            command: ["/bin/bash", "/scripts/backup-test.sh"]
+            volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+            resources:
+              limits:
+                cpu: 500m
+                memory: 512Mi
+              requests:
+                cpu: 200m
+                memory: 256Mi
+          volumes:
+          - name: scripts
+            configMap:
+              name: dr-test-scripts
+              defaultMode: 0755
+
+---
+# Job for manual DR testing
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dr-full-test
+  namespace: dr-testing
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: dr-test
+        test-type: full
+    spec:
+      serviceAccountName: dr-test-runner
+      restartPolicy: Never
+      containers:
+      - name: dr-test
+        image: bitnami/kubectl:latest
+        command:
+        - /bin/bash
+        - -c
+        - |
+          set -e
+          echo "Running full disaster recovery test suite..."
+
+          # Run backup test
+          /scripts/backup-test.sh
+
+          # Run restore test
+          /scripts/restore-test.sh
+
+          # Run node failure test
+          /scripts/node-failure-test.sh
+
+          echo "All DR tests completed successfully"
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 200m
+            memory: 256Mi
+      volumes:
+      - name: scripts
+        configMap:
+          name: dr-test-scripts
+          defaultMode: 0755

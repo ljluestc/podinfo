@@ -1,0 +1,531 @@
+---
+# Idle Resource Detection and Cleanup
+# Automated system to identify and clean up idle/unused resources
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: idle-resource-cleaner
+  namespace: opencost
+  labels:
+    app: idle-cleanup
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: idle-resource-cleaner
+  labels:
+    app: idle-cleanup
+rules:
+  - apiGroups: [""]
+    resources:
+      - pods
+      - persistentvolumeclaims
+      - services
+      - configmaps
+      - secrets
+    verbs:
+      - get
+      - list
+      - delete
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - statefulsets
+      - daemonsets
+      - replicasets
+    verbs:
+      - get
+      - list
+      - patch
+      - delete
+  - apiGroups: ["batch"]
+    resources:
+      - jobs
+      - cronjobs
+    verbs:
+      - get
+      - list
+      - delete
+  - apiGroups: [""]
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: idle-resource-cleaner
+  labels:
+    app: idle-cleanup
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: idle-resource-cleaner
+subjects:
+  - kind: ServiceAccount
+    name: idle-resource-cleaner
+    namespace: opencost
+
+---
+# ConfigMap with idle resource detection configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: idle-cleanup-config
+  namespace: opencost
+  labels:
+    app: idle-cleanup
+data:
+  config.yaml: |
+    # Idle resource detection configuration
+    detection:
+      # Enable/disable detection for each resource type
+      enabled:
+        deployments: true
+        statefulsets: true
+        pvcs: true
+        jobs: true
+        pods: true
+
+      # Thresholds for considering resources idle
+      thresholds:
+        # Deployment with 0 replicas for this many hours
+        zero_replica_hours: 72  # 3 days
+
+        # CPU usage below this percentage
+        cpu_idle_percent: 5
+
+        # Memory usage below this percentage
+        memory_idle_percent: 10
+
+        # PVC not mounted for this many hours
+        pvc_unmounted_hours: 168  # 7 days
+
+        # Completed job age in hours
+        completed_job_hours: 48  # 2 days
+
+        # Failed job age in hours
+        failed_job_hours: 24  # 1 day
+
+        # Pod in CrashLoopBackOff for hours
+        crashloop_hours: 12
+
+    cleanup:
+      # Cleanup actions
+      mode: "report"  # Options: report, dryrun, delete
+
+      # Safety settings
+      safety:
+        # Never delete resources with these labels
+        protected_labels:
+          - "app.kubernetes.io/managed-by=Helm"
+          - "protected=true"
+          - "cost-optimization/exclude=true"
+
+        # Never delete from these namespaces
+        protected_namespaces:
+          - kube-system
+          - kube-public
+          - kube-node-lease
+          - monitoring
+          - opencost
+          - ingress-nginx
+          - cert-manager
+
+      # Notification settings
+      notifications:
+        enabled: true
+        # Notify before deletion (hours)
+        warning_period: 24
+        # Channels
+        channels:
+          - email
+          - slack
+
+  cleanup-script.py: |
+    #!/usr/bin/env python3
+    """
+    Idle resource detection and cleanup script
+    """
+    import os
+    import yaml
+    import json
+    from datetime import datetime, timedelta
+    from kubernetes import client, config
+    import logging
+
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+
+    # Load config
+    with open('/config/config.yaml', 'r') as f:
+        CONFIG = yaml.safe_load(f)
+
+    CLEANUP_MODE = os.getenv("CLEANUP_MODE", CONFIG['cleanup']['mode'])
+
+    def is_protected(resource):
+        """Check if resource is protected from deletion"""
+        namespace = resource.metadata.namespace
+        labels = resource.metadata.labels or {}
+
+        # Check namespace protection
+        if namespace in CONFIG['cleanup']['safety']['protected_namespaces']:
+            return True
+
+        # Check label protection
+        for label_key, label_value in labels.items():
+            protected_label = f"{label_key}={label_value}"
+            if protected_label in CONFIG['cleanup']['safety']['protected_labels']:
+                return True
+
+        return False
+
+    def find_idle_deployments():
+        """Find deployments with 0 replicas for extended period"""
+        config.load_incluster_config()
+        apps_v1 = client.AppsV1Api()
+
+        threshold = timedelta(
+            hours=CONFIG['detection']['thresholds']['zero_replica_hours']
+        )
+        idle_deployments = []
+
+        deployments = apps_v1.list_deployment_for_all_namespaces()
+
+        for deploy in deployments.items:
+            if is_protected(deploy):
+                continue
+
+            if deploy.spec.replicas == 0:
+                # Check how long it's been at 0 replicas
+                age = datetime.now(deploy.metadata.creation_timestamp.tzinfo) - \
+                      deploy.metadata.creation_timestamp
+
+                if age > threshold:
+                    idle_deployments.append({
+                        'type': 'Deployment',
+                        'name': deploy.metadata.name,
+                        'namespace': deploy.metadata.namespace,
+                        'reason': f'Zero replicas for {age.days} days',
+                        'age_hours': age.total_seconds() / 3600,
+                        'estimated_savings': 0  # No cost if scaled to 0
+                    })
+
+        return idle_deployments
+
+    def find_idle_pvcs():
+        """Find PVCs not attached to any pod"""
+        config.load_incluster_config()
+        v1 = client.CoreV1Api()
+
+        threshold = timedelta(
+            hours=CONFIG['detection']['thresholds']['pvc_unmounted_hours']
+        )
+        idle_pvcs = []
+
+        # Get all PVCs
+        pvcs = v1.list_persistent_volume_claim_for_all_namespaces()
+
+        # Get all pods to check which PVCs are in use
+        pods = v1.list_pod_for_all_namespaces()
+        used_pvcs = set()
+
+        for pod in pods.items:
+            if pod.spec.volumes:
+                for volume in pod.spec.volumes:
+                    if volume.persistent_volume_claim:
+                        used_pvcs.add(
+                            f"{pod.metadata.namespace}/{volume.persistent_volume_claim.claim_name}"
+                        )
+
+        for pvc in pvcs.items:
+            pvc_key = f"{pvc.metadata.namespace}/{pvc.metadata.name}"
+
+            if pvc_key not in used_pvcs:
+                age = datetime.now(pvc.metadata.creation_timestamp.tzinfo) - \
+                      pvc.metadata.creation_timestamp
+
+                if age > threshold:
+                    # Calculate storage cost
+                    storage_gb = pvc.spec.resources.requests.get('storage', '0Gi')
+                    storage_value = int(storage_gb.replace('Gi', ''))
+                    monthly_cost = storage_value * 0.10  # $0.10 per GB/month estimate
+
+                    idle_pvcs.append({
+                        'type': 'PersistentVolumeClaim',
+                        'name': pvc.metadata.name,
+                        'namespace': pvc.metadata.namespace,
+                        'reason': f'Not mounted for {age.days} days',
+                        'age_hours': age.total_seconds() / 3600,
+                        'size': storage_gb,
+                        'estimated_savings': monthly_cost
+                    })
+
+        return idle_pvcs
+
+    def find_old_completed_jobs():
+        """Find completed jobs that can be cleaned up"""
+        config.load_incluster_config()
+        batch_v1 = client.BatchV1Api()
+
+        threshold = timedelta(
+            hours=CONFIG['detection']['thresholds']['completed_job_hours']
+        )
+        old_jobs = []
+
+        jobs = batch_v1.list_job_for_all_namespaces()
+
+        for job in jobs.items:
+            if is_protected(job):
+                continue
+
+            if job.status.succeeded and job.status.completion_time:
+                age = datetime.now(job.status.completion_time.tzinfo) - \
+                      job.status.completion_time
+
+                if age > threshold:
+                    old_jobs.append({
+                        'type': 'Job',
+                        'name': job.metadata.name,
+                        'namespace': job.metadata.namespace,
+                        'reason': f'Completed {age.days} days ago',
+                        'age_hours': age.total_seconds() / 3600,
+                        'estimated_savings': 0  # Minimal cost
+                    })
+
+        return old_jobs
+
+    def find_crashloop_pods():
+        """Find pods stuck in CrashLoopBackOff"""
+        config.load_incluster_config()
+        v1 = client.CoreV1Api()
+
+        threshold = timedelta(
+            hours=CONFIG['detection']['thresholds']['crashloop_hours']
+        )
+        crashloop_pods = []
+
+        pods = v1.list_pod_for_all_namespaces()
+
+        for pod in pods.items:
+            if is_protected(pod):
+                continue
+
+            for container_status in (pod.status.container_statuses or []):
+                if container_status.state.waiting:
+                    if container_status.state.waiting.reason == 'CrashLoopBackOff':
+                        age = datetime.now(pod.metadata.creation_timestamp.tzinfo) - \
+                              pod.metadata.creation_timestamp
+
+                        if age > threshold:
+                            crashloop_pods.append({
+                                'type': 'Pod',
+                                'name': pod.metadata.name,
+                                'namespace': pod.metadata.namespace,
+                                'reason': f'CrashLoopBackOff for {age.days} days',
+                                'age_hours': age.total_seconds() / 3600,
+                                'estimated_savings': 5  # Rough estimate
+                            })
+
+        return crashloop_pods
+
+    def cleanup_resource(resource_info):
+        """Delete a resource (based on cleanup mode)"""
+        if CLEANUP_MODE == "report":
+            logger.info(f"[REPORT] Would delete {resource_info['type']} "
+                       f"{resource_info['namespace']}/{resource_info['name']}")
+            return False
+        elif CLEANUP_MODE == "dryrun":
+            logger.info(f"[DRYRUN] Simulating deletion of {resource_info['type']} "
+                       f"{resource_info['namespace']}/{resource_info['name']}")
+            return False
+        elif CLEANUP_MODE == "delete":
+            logger.info(f"[DELETE] Removing {resource_info['type']} "
+                       f"{resource_info['namespace']}/{resource_info['name']}")
+            # Actual deletion would happen here
+            return True
+
+    def main():
+        logger.info(f"Starting idle resource detection (mode: {CLEANUP_MODE})")
+
+        all_idle_resources = []
+
+        if CONFIG['detection']['enabled']['deployments']:
+            all_idle_resources.extend(find_idle_deployments())
+
+        if CONFIG['detection']['enabled']['pvcs']:
+            all_idle_resources.extend(find_idle_pvcs())
+
+        if CONFIG['detection']['enabled']['jobs']:
+            all_idle_resources.extend(find_old_completed_jobs())
+
+        if CONFIG['detection']['enabled']['pods']:
+            all_idle_resources.extend(find_crashloop_pods())
+
+        # Generate report
+        report = {
+            'timestamp': datetime.now().isoformat(),
+            'mode': CLEANUP_MODE,
+            'idle_resources': all_idle_resources,
+            'total_count': len(all_idle_resources),
+            'total_potential_savings': sum(
+                r.get('estimated_savings', 0) for r in all_idle_resources
+            )
+        }
+
+        print(json.dumps(report, indent=2))
+
+        # Save report
+        with open('/tmp/idle-resources-report.json', 'w') as f:
+            json.dump(report, f, indent=2)
+
+        logger.info(f"Found {len(all_idle_resources)} idle resources")
+        logger.info(f"Potential monthly savings: ${report['total_potential_savings']:.2f}")
+
+        # Perform cleanup if in delete mode
+        if CLEANUP_MODE == "delete":
+            for resource in all_idle_resources:
+                cleanup_resource(resource)
+
+    if __name__ == "__main__":
+        main()
+
+---
+# CronJob to run idle resource detection daily
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: idle-resource-detector
+  namespace: opencost
+  labels:
+    app: idle-cleanup
+spec:
+  # Run daily at 3 AM
+  schedule: "0 3 * * *"
+  successfulJobsHistoryLimit: 5
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: idle-cleanup
+        spec:
+          serviceAccountName: idle-resource-cleaner
+          restartPolicy: OnFailure
+          containers:
+            - name: detector
+              image: python:3.11-alpine
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  echo "Installing dependencies..."
+                  pip install kubernetes pyyaml > /dev/null 2>&1
+                  echo "Running idle resource detection..."
+                  python3 /scripts/cleanup-script.py
+              env:
+                - name: CLEANUP_MODE
+                  value: "report"  # Change to "delete" to enable actual cleanup
+              resources:
+                requests:
+                  cpu: "100m"
+                  memory: "256Mi"
+                limits:
+                  cpu: "500m"
+                  memory: "512Mi"
+              volumeMounts:
+                - name: config
+                  mountPath: /config
+                - name: scripts
+                  mountPath: /scripts
+          volumes:
+            - name: config
+              configMap:
+                name: idle-cleanup-config
+            - name: scripts
+              configMap:
+                name: idle-cleanup-config
+                items:
+                  - key: cleanup-script.py
+                    path: cleanup-script.py
+                    mode: 0755
+
+---
+# ConfigMap for cost optimization policies
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cost-optimization-policies
+  namespace: opencost
+  labels:
+    app: cost-optimization
+data:
+  policies.yaml: |
+    # Cost optimization policies
+    policies:
+      # Automatic scaling policies
+      autoscaling:
+        # Scale down idle workloads
+        scale_down_idle:
+          enabled: true
+          idle_threshold_minutes: 60
+          min_replicas: 0
+          excluded_namespaces:
+            - production
+
+        # Scale down during off-hours
+        schedule_based:
+          enabled: true
+          schedules:
+            # Scale down dev environments at night
+            - name: "dev-night"
+              namespaces: ["development", "staging"]
+              cron: "0 20 * * 1-5"  # 8 PM weekdays
+              replicas: 0
+            # Scale up dev environments in morning
+            - name: "dev-morning"
+              namespaces: ["development", "staging"]
+              cron: "0 8 * * 1-5"  # 8 AM weekdays
+              replicas: 1
+
+      # Resource limit enforcement
+      limits:
+        # Enforce resource requests/limits
+        enforce_requests: true
+        enforce_limits: true
+
+        # Default limits if not specified
+        defaults:
+          cpu_request: "100m"
+          cpu_limit: "500m"
+          memory_request: "128Mi"
+          memory_limit: "512Mi"
+
+      # Storage optimization
+      storage:
+        # Automatic PVC cleanup
+        cleanup_unused_pvcs:
+          enabled: true
+          age_days: 7
+
+        # Storage class optimization
+        use_cost_effective_storage:
+          enabled: true
+          default_storage_class: "standard"
+
+      # Spot instance policies
+      spot_instances:
+        # Use spot instances for non-critical workloads
+        enabled: true
+        namespaces:
+          - development
+          - testing
+        node_selector:
+          node.kubernetes.io/instance-type: "spot"

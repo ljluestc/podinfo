@@ -1,0 +1,112 @@
+---
+# NetworkChaos: Network delay experiment
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: network-delay-experiment
+  namespace: chaos-testing
+spec:
+  action: delay
+  mode: one
+  selector:
+    namespaces:
+      - chaos-target
+    labelSelectors:
+      "chaos-test": "enabled"
+  delay:
+    latency: "200ms"
+    correlation: "100"
+    jitter: "50ms"
+  duration: "5m"
+  direction: to
+
+---
+# NetworkChaos: Network loss experiment
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: network-loss-experiment
+  namespace: chaos-testing
+spec:
+  action: loss
+  mode: one
+  selector:
+    namespaces:
+      - chaos-target
+    labelSelectors:
+      "chaos-test": "enabled"
+  loss:
+    loss: "25"
+    correlation: "50"
+  duration: "3m"
+  direction: to
+
+---
+# NetworkChaos: Network partition experiment
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: network-partition-experiment
+  namespace: chaos-testing
+spec:
+  action: partition
+  mode: all
+  selector:
+    namespaces:
+      - chaos-target
+    labelSelectors:
+      "app": "frontend"
+  direction: both
+  target:
+    mode: all
+    selector:
+      namespaces:
+        - chaos-target
+      labelSelectors:
+        "app": "backend"
+  duration: "2m"
+
+---
+# NetworkChaos: Bandwidth limitation
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: network-bandwidth-experiment
+  namespace: chaos-testing
+spec:
+  action: bandwidth
+  mode: one
+  selector:
+    namespaces:
+      - chaos-target
+    labelSelectors:
+      "chaos-test": "enabled"
+  bandwidth:
+    rate: "1mbps"
+    limit: 20000
+    buffer: 10000
+  duration: "5m"
+  direction: to
+
+---
+# NetworkChaos: DNS chaos experiment
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: dns-chaos-experiment
+  namespace: chaos-testing
+spec:
+  action: delay
+  mode: all
+  selector:
+    namespaces:
+      - chaos-target
+    labelSelectors:
+      "chaos-test": "enabled"
+  delay:
+    latency: "500ms"
+  externalTargets:
+    - "google.com"
+    - "github.com"
+  duration: "2m"
+  direction: to

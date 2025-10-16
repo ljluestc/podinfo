@@ -1,0 +1,34 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: kube-system
+
+resources:
+  # CoreDNS custom configuration
+  - coredns-custom-configmap.yaml
+
+  # External DNS for automatic record management
+  - external-dns-deployment.yaml
+
+  # Service discovery examples
+  - service-discovery-examples.yaml
+
+  # Split-horizon DNS configuration
+  - split-horizon-dns.yaml
+
+  # DNS-based load balancing
+  - dns-load-balancing.yaml
+
+  # DNS monitoring and troubleshooting
+  - dns-monitoring.yaml
+
+commonLabels:
+  app.kubernetes.io/part-of: podinfo
+  app.kubernetes.io/managed-by: kustomize
+  security.podinfo.io/component: dns
+
+# Configuration for different environments
+# To use: kustomize build --enable-alpha-plugins
+
+# Optional: Add namespace transformation
+# Will ensure all resources without explicit namespace use kube-system
