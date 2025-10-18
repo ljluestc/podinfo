@@ -46,7 +46,22 @@
       "Bash(./validate-recipes.sh:*)",
       "Bash(bash:*)",
       "Bash(grep:*)",
-      "Bash(./quick-validate.sh:*)"
+      "Bash(./quick-validate.sh:*)",
+      "Bash(mvn:*)",
+      "Bash(if [ -f pom.xml ])",
+      "Bash(then mvn -q test jacoco:report)",
+      "Bash(fi)",
+      "Bash(if [ -f target/site/jacoco/index.html ])",
+      "Bash(then grep -A 5 \"Total\" target/site/jacoco/index.html)",
+      "Bash(else echo \"No JaCoCo report found\")",
+      "Bash(if [ -f go.mod ])",
+      "Bash(then echo \"Go project detected\")",
+      "Bash(go test:*)",
+      "Bash(go tool cover:*)",
+      "Read(//proc/sys/fs/inotify/**)",
+      "Read(//proc/**)",
+      "Bash(lsof:*)",
+      "Bash(git add:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

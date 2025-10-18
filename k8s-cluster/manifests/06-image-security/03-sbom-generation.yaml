@@ -1,0 +1,586 @@
+---
+# SBOM (Software Bill of Materials) Generation and Management
+# Uses Syft for SBOM generation and Cosign for attaching to images
+
+---
+# Namespace for SBOM tools
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sbom-system
+  labels:
+    name: sbom-system
+    pod-security.kubernetes.io/enforce: restricted
+
+---
+# SBOM Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sbom-config
+  namespace: sbom-system
+data:
+  # Syft configuration
+  syft.yaml: |
+    # Output formats
+    output:
+      - json
+      - spdx-json
+      - cyclonedx-json
+
+    # Cataloger configuration
+    catalogers:
+      enabled:
+        - python
+        - ruby
+        - javascript
+        - java
+        - go
+        - rust
+        - dotnet
+        - php
+
+    # File scanning
+    file:
+      metadata:
+        digests:
+          - sha256
+      content:
+        skip-files-above-size: 1048576  # 1MB
+
+    # Registry configuration
+    registry:
+      insecure-skip-tls-verify: false
+      insecure-use-http: false
+
+  # SBOM quality requirements
+  sbom-requirements.yaml: |
+    # Minimum SBOM quality requirements
+    minComponents: 10
+    requiredFields:
+      - name
+      - version
+      - licenses
+      - supplier
+    requiredFormats:
+      - spdx-json
+      - cyclonedx-json
+
+    # License policy
+    allowedLicenses:
+      - Apache-2.0
+      - MIT
+      - BSD-3-Clause
+      - BSD-2-Clause
+      - ISC
+      - MPL-2.0
+
+    blockedLicenses:
+      - GPL-3.0
+      - AGPL-3.0
+      - SSPL-1.0
+
+    warningLicenses:
+      - GPL-2.0
+      - LGPL-2.1
+      - LGPL-3.0
+
+---
+# SBOM Generation Scripts
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sbom-scripts
+  namespace: sbom-system
+data:
+  generate-sbom.sh: |
+    #!/bin/bash
+    set -euo pipefail
+
+    IMAGE="${1:-}"
+    OUTPUT_DIR="${2:-/tmp/sbom}"
+
+    if [ -z "$IMAGE" ]; then
+      echo "Usage: $0 <image> [output-dir]"
+      exit 1
+    fi
+
+    echo "Generating SBOM for image: $IMAGE"
+
+    mkdir -p "$OUTPUT_DIR"
+
+    # Generate SBOM in multiple formats
+    echo "Generating SPDX JSON..."
+    syft "$IMAGE" -o spdx-json > "$OUTPUT_DIR/sbom-spdx.json"
+
+    echo "Generating CycloneDX JSON..."
+    syft "$IMAGE" -o cyclonedx-json > "$OUTPUT_DIR/sbom-cyclonedx.json"
+
+    echo "Generating Syft JSON (detailed)..."
+    syft "$IMAGE" -o json > "$OUTPUT_DIR/sbom-syft.json"
+
+    echo "Generating table format..."
+    syft "$IMAGE" -o table > "$OUTPUT_DIR/sbom-table.txt"
+
+    echo "SBOM generation complete!"
+    ls -lh "$OUTPUT_DIR"
+
+  attach-sbom.sh: |
+    #!/bin/bash
+    set -euo pipefail
+
+    IMAGE="${1:-}"
+    SBOM_FILE="${2:-}"
+
+    if [ -z "$IMAGE" ] || [ -z "$SBOM_FILE" ]; then
+      echo "Usage: $0 <image> <sbom-file>"
+      exit 1
+    fi
+
+    if [ ! -f "$SBOM_FILE" ]; then
+      echo "Error: SBOM file not found: $SBOM_FILE"
+      exit 1
+    fi
+
+    echo "Attaching SBOM to image: $IMAGE"
+
+    # Determine SBOM type
+    SBOM_TYPE="spdx"
+    if grep -q "cyclonedx" "$SBOM_FILE"; then
+      SBOM_TYPE="cyclonedx"
+    fi
+
+    # Attach SBOM using Cosign
+    cosign attach sbom --sbom "$SBOM_FILE" --type "$SBOM_TYPE" "$IMAGE"
+
+    echo "SBOM attached successfully!"
+
+    # Verify attachment
+    cosign verify-attestation --type "$SBOM_TYPE" "$IMAGE" || true
+
+  validate-sbom.sh: |
+    #!/bin/bash
+    set -euo pipefail
+
+    SBOM_FILE="${1:-}"
+
+    if [ -z "$SBOM_FILE" ]; then
+      echo "Usage: $0 <sbom-file>"
+      exit 1
+    fi
+
+    if [ ! -f "$SBOM_FILE" ]; then
+      echo "Error: SBOM file not found: $SBOM_FILE"
+      exit 1
+    fi
+
+    echo "Validating SBOM: $SBOM_FILE"
+
+    # Detect format
+    FORMAT="unknown"
+    if grep -q "spdxVersion" "$SBOM_FILE"; then
+      FORMAT="spdx"
+    elif grep -q "bomFormat" "$SBOM_FILE"; then
+      FORMAT="cyclonedx"
+    fi
+
+    echo "Detected format: $FORMAT"
+
+    # Validate structure
+    if [ "$FORMAT" = "spdx" ]; then
+      # Validate SPDX structure
+      jq -e '.spdxVersion' "$SBOM_FILE" >/dev/null 2>&1 || {
+        echo "Error: Missing spdxVersion"
+        exit 1
+      }
+      jq -e '.packages' "$SBOM_FILE" >/dev/null 2>&1 || {
+        echo "Error: Missing packages array"
+        exit 1
+      }
+      COMPONENT_COUNT=$(jq '.packages | length' "$SBOM_FILE")
+    elif [ "$FORMAT" = "cyclonedx" ]; then
+      # Validate CycloneDX structure
+      jq -e '.bomFormat' "$SBOM_FILE" >/dev/null 2>&1 || {
+        echo "Error: Missing bomFormat"
+        exit 1
+      }
+      jq -e '.components' "$SBOM_FILE" >/dev/null 2>&1 || {
+        echo "Error: Missing components array"
+        exit 1
+      }
+      COMPONENT_COUNT=$(jq '.components | length' "$SBOM_FILE")
+    else
+      echo "Error: Unknown SBOM format"
+      exit 1
+    fi
+
+    echo "Components found: $COMPONENT_COUNT"
+
+    # Check minimum components
+    MIN_COMPONENTS=${MIN_COMPONENTS:-10}
+    if [ "$COMPONENT_COUNT" -lt "$MIN_COMPONENTS" ]; then
+      echo "Warning: Component count ($COMPONENT_COUNT) below minimum ($MIN_COMPONENTS)"
+    fi
+
+    echo "SBOM validation passed!"
+
+  scan-licenses.sh: |
+    #!/bin/bash
+    set -euo pipefail
+
+    SBOM_FILE="${1:-}"
+
+    if [ -z "$SBOM_FILE" ]; then
+      echo "Usage: $0 <sbom-file>"
+      exit 1
+    fi
+
+    echo "Scanning licenses in SBOM: $SBOM_FILE"
+
+    # Extract licenses
+    if grep -q "spdxVersion" "$SBOM_FILE"; then
+      # SPDX format
+      jq -r '.packages[] | select(.licenseConcluded != null and .licenseConcluded != "NOASSERTION") | .licenseConcluded' "$SBOM_FILE" | sort -u
+    elif grep -q "bomFormat" "$SBOM_FILE"; then
+      # CycloneDX format
+      jq -r '.components[] | select(.licenses != null) | .licenses[] | .license.id // .license.name' "$SBOM_FILE" | sort -u
+    fi
+
+  compare-sboms.sh: |
+    #!/bin/bash
+    set -euo pipefail
+
+    SBOM1="${1:-}"
+    SBOM2="${2:-}"
+
+    if [ -z "$SBOM1" ] || [ -z "$SBOM2" ]; then
+      echo "Usage: $0 <sbom1> <sbom2>"
+      exit 1
+    fi
+
+    echo "Comparing SBOMs:"
+    echo "  SBOM 1: $SBOM1"
+    echo "  SBOM 2: $SBOM2"
+
+    # Extract component lists
+    COMPONENTS1=$(mktemp)
+    COMPONENTS2=$(mktemp)
+
+    if grep -q "spdxVersion" "$SBOM1"; then
+      jq -r '.packages[] | "\(.name)@\(.versionInfo)"' "$SBOM1" | sort > "$COMPONENTS1"
+    else
+      jq -r '.components[] | "\(.name)@\(.version)"' "$SBOM1" | sort > "$COMPONENTS1"
+    fi
+
+    if grep -q "spdxVersion" "$SBOM2"; then
+      jq -r '.packages[] | "\(.name)@\(.versionInfo)"' "$SBOM2" | sort > "$COMPONENTS2"
+    else
+      jq -r '.components[] | "\(.name)@\(.version)"' "$SBOM2" | sort > "$COMPONENTS2"
+    fi
+
+    # Show differences
+    echo ""
+    echo "Added components:"
+    comm -13 "$COMPONENTS1" "$COMPONENTS2"
+
+    echo ""
+    echo "Removed components:"
+    comm -23 "$COMPONENTS1" "$COMPONENTS2"
+
+    echo ""
+    echo "Common components:"
+    comm -12 "$COMPONENTS1" "$COMPONENTS2" | wc -l
+
+    rm -f "$COMPONENTS1" "$COMPONENTS2"
+
+---
+# SBOM Generation Job Template
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sbom-generate
+  namespace: sbom-system
+spec:
+  template:
+    metadata:
+      labels:
+        app: sbom-generator
+    spec:
+      serviceAccountName: sbom-generator
+      restartPolicy: Never
+      containers:
+      - name: syft
+        image: anchore/syft:latest
+        command:
+        - sh
+        - -c
+        - |
+          #!/bin/sh
+          set -e
+
+          IMAGE="${IMAGE:-harbor.example.com/production/myapp:latest}"
+
+          echo "Generating SBOM for: $IMAGE"
+
+          # Generate SBOM
+          syft "$IMAGE" -o spdx-json > /tmp/sbom-spdx.json
+          syft "$IMAGE" -o cyclonedx-json > /tmp/sbom-cyclonedx.json
+
+          echo "SBOM generation complete!"
+
+          # Display summary
+          echo "SPDX SBOM:"
+          jq -r '.packages | length' /tmp/sbom-spdx.json | awk '{print "  Components: " $1}'
+
+          echo "CycloneDX SBOM:"
+          jq -r '.components | length' /tmp/sbom-cyclonedx.json | awk '{print "  Components: " $1}'
+
+          # Attach to image if Cosign is available
+          if command -v cosign >/dev/null 2>&1; then
+            echo "Attaching SBOM to image..."
+            cosign attach sbom --sbom /tmp/sbom-spdx.json "$IMAGE" || true
+          fi
+        env:
+        - name: IMAGE
+          value: "harbor.example.com/production/myapp:latest"
+        volumeMounts:
+        - name: output
+          mountPath: /tmp
+      volumes:
+      - name: output
+        emptyDir: {}
+
+---
+# CronJob for periodic SBOM generation
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: sbom-periodic-generation
+  namespace: sbom-system
+spec:
+  schedule: "0 3 * * *"  # Daily at 3 AM
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: sbom-generator
+        spec:
+          serviceAccountName: sbom-generator
+          restartPolicy: Never
+          containers:
+          - name: syft
+            image: anchore/syft:latest
+            command:
+            - sh
+            - -c
+            - |
+              #!/bin/sh
+              set -e
+
+              echo "Starting periodic SBOM generation..."
+
+              # Get all running images
+              kubectl get pods --all-namespaces -o json | \
+              jq -r '.items[] | select(.status.phase=="Running") | .spec.containers[].image' | \
+              sort -u | \
+              while read image; do
+                echo "Generating SBOM for: $image"
+
+                # Generate and store SBOM
+                syft "$image" -o spdx-json > "/tmp/sbom-$(echo $image | tr '/:' '_').json" 2>/dev/null || {
+                  echo "  Failed to generate SBOM for $image"
+                  continue
+                }
+
+                echo "  SBOM generated successfully"
+              done
+
+              echo "Periodic SBOM generation complete!"
+
+---
+# ServiceAccount for SBOM operations
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sbom-generator
+  namespace: sbom-system
+automountServiceAccountToken: true
+
+---
+# ClusterRole for SBOM generator
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sbom-generator-role
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["get", "list", "watch", "create"]
+
+---
+# ClusterRoleBinding for SBOM generator
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sbom-generator-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: sbom-generator-role
+subjects:
+- kind: ServiceAccount
+  name: sbom-generator
+  namespace: sbom-system
+
+---
+# SBOM Storage PVC
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sbom-storage
+  namespace: sbom-system
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+# SBOM API Service (for serving SBOMs)
+apiVersion: v1
+kind: Service
+metadata:
+  name: sbom-api
+  namespace: sbom-system
+  labels:
+    app: sbom-api
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8080
+      targetPort: 8080
+      protocol: TCP
+      name: http
+  selector:
+    app: sbom-api
+
+---
+# Deployment for SBOM API server
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sbom-api
+  namespace: sbom-system
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sbom-api
+  template:
+    metadata:
+      labels:
+        app: sbom-api
+    spec:
+      serviceAccountName: sbom-generator
+      containers:
+      - name: api
+        image: nginx:alpine
+        ports:
+        - containerPort: 8080
+        volumeMounts:
+        - name: sbom-storage
+          mountPath: /usr/share/nginx/html/sboms
+          readOnly: true
+        - name: nginx-config
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+      volumes:
+      - name: sbom-storage
+        persistentVolumeClaim:
+          claimName: sbom-storage
+      - name: nginx-config
+        configMap:
+          name: sbom-api-config
+
+---
+# SBOM API Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sbom-api-config
+  namespace: sbom-system
+data:
+  nginx.conf: |
+    events {
+      worker_connections 1024;
+    }
+
+    http {
+      include /etc/nginx/mime.types;
+      default_type application/octet-stream;
+
+      server {
+        listen 8080;
+        server_name _;
+
+        location /sboms/ {
+          alias /usr/share/nginx/html/sboms/;
+          autoindex on;
+          autoindex_format json;
+        }
+
+        location /health {
+          access_log off;
+          return 200 "healthy\n";
+          add_header Content-Type text/plain;
+        }
+      }
+    }
+
+---
+# NetworkPolicy for SBOM system
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sbom-network-policy
+  namespace: sbom-system
+spec:
+  podSelector:
+    matchLabels:
+      app: sbom-generator
+  policyTypes:
+  - Ingress
+  - Egress
+  egress:
+  # Allow access to container registries
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 5000
+  # Allow DNS
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53

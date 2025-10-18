@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Comprehensive Test Coverage and Systems Implementation Script
-Achieves 100% test coverage across all systems and implements all PRD requirements
+Comprehensive Test Orchestration System for Podinfo Application
+This script orchestrates comprehensive testing across Go, Java, and Python
 """
 
 import subprocess
@@ -9,661 +9,426 @@ import sys
 import os
 import time
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+import argparse
 
-class TestComprehensive:
+class TestOrchestrator:
     def __init__(self):
-        self.project_root = Path("/home/calelin/dev/podinfo")
-        self.coverage_threshold = 100.0
-        self.test_results = {}
-        self.coverage_results = {}
+        self.start_time = time.time()
+        self.results = {
+            'go_tests': {},
+            'java_tests': {},
+            'python_tests': {},
+            'coverage': {},
+            'performance': {},
+            'integration': {},
+            'security': {},
+            'summary': {}
+        }
+        self.project_root = Path.cwd()
         
-    def run_go_tests(self):
-        """Run Go tests and collect coverage data"""
-        print("🚀 Running Go test suite...")
+    def log(self, message, level="INFO"):
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{timestamp}] [{level}] {message}")
         
+    def run_command(self, command, cwd=None, timeout=300):
+        """Run a command and return the result"""
         try:
-            # Set up Go environment
-            env = os.environ.copy()
-            env['PATH'] = f"{self.project_root}/go/bin:{env['PATH']}"
-            env['GOROOT'] = f"{self.project_root}/go"
-            
-            # Run tests with coverage
-            cmd = [f"{self.project_root}/go/bin/go", "test", "-coverprofile=coverage.out", "./pkg/...", "./cmd/..."]
-            result = subprocess.run(cmd, cwd=self.project_root, env=env, capture_output=True, text=True)
-            
-            if result.returncode != 0:
-                print(f"❌ Go tests failed: {result.stderr}")
-                return False
-                
-            # Get coverage percentage
-            cmd = [f"{self.project_root}/go/bin/go", "tool", "cover", "-func=coverage.out"]
-            result = subprocess.run(cmd, cwd=self.project_root, env=env, capture_output=True, text=True)
-            
-            if result.returncode == 0:
-                lines = result.stdout.strip().split('\n')
-                if lines:
-                    total_line = lines[-1]
-                    if 'total:' in total_line:
-                        coverage_str = total_line.split()[-1].replace('%', '')
-                        try:
-                            coverage = float(coverage_str)
-                            self.coverage_results['go'] = coverage
-                            print(f"✅ Go test coverage: {coverage}%")
-                        except ValueError:
-                            print(f"⚠️ Could not parse coverage: {coverage_str}")
-                            self.coverage_results['go'] = 0.0
-                    else:
-                        print("⚠️ Could not find total coverage line")
-                        self.coverage_results['go'] = 0.0
-                else:
-                    print("⚠️ No coverage output")
-                    self.coverage_results['go'] = 0.0
-            else:
-                print(f"❌ Coverage analysis failed: {result.stderr}")
-                self.coverage_results['go'] = 0.0
-                
-            return True
-            
+            self.log(f"Running: {command}")
+            result = subprocess.run(
+                command,
+                shell=True,
+                cwd=cwd or self.project_root,
+                capture_output=True,
+                text=True,
+                timeout=timeout
+            )
+            return {
+                'success': result.returncode == 0,
+                'returncode': result.returncode,
+                'stdout': result.stdout,
+                'stderr': result.stderr,
+                'command': command
+            }
+        except subprocess.TimeoutExpired:
+            return {
+                'success': False,
+                'returncode': -1,
+                'stdout': '',
+                'stderr': f'Command timed out after {timeout} seconds',
+                'command': command
+            }
         except Exception as e:
-            print(f"❌ Error running Go tests: {e}")
-            return False
+            return {
+                'success': False,
+                'returncode': -1,
+                'stdout': '',
+                'stderr': str(e),
+                'command': command
+            }
     
-    def create_java_test_files(self):
-        """Create Java test files for comprehensive testing"""
-        print("📝 Creating Java test files...")
+    def run_go_tests(self):
+        """Run comprehensive Go tests"""
+        self.log("Starting Go test execution...")
         
-        java_tests = {
-            "TinyURLTest.java": """
-package com.podinfo.test;
-
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.DisplayName;
-import static org.junit.jupiter.api.Assertions.*;
-
-public class TinyURLTest {
-    private TinyURLService service;
-    
-    @BeforeEach
-    void setUp() {
-        service = new TinyURLService();
-    }
-    
-    @Test
-    @DisplayName("Test URL shortening functionality")
-    void testShortenURL() {
-        String longURL = "https://example.com/very/long/url";
-        String shortURL = service.shortenURL(longURL);
-        assertNotNull(shortURL);
-        assertTrue(shortURL.length() < longURL.length());
-    }
-    
-    @Test
-    @DisplayName("Test URL expansion functionality")
-    void testExpandURL() {
-        String longURL = "https://example.com/very/long/url";
-        String shortURL = service.shortenURL(longURL);
-        String expandedURL = service.expandURL(shortURL);
-        assertEquals(longURL, expandedURL);
-    }
-    
-    @Test
-    @DisplayName("Test concurrent URL operations")
-    void testConcurrentOperations() throws InterruptedException {
-        int numThreads = 10;
-        Thread[] threads = new Thread[numThreads];
+        # Set up Go environment
+        go_path = self.project_root / "go" / "bin"
+        go_root = self.project_root / "go"
         
-        for (int i = 0; i < numThreads; i++) {
-            final int threadId = i;
-            threads[i] = new Thread(() -> {
-                String longURL = "https://example.com/url/" + threadId;
-                String shortURL = service.shortenURL(longURL);
-                String expandedURL = service.expandURL(shortURL);
-                assertEquals(longURL, expandedURL);
-            });
-        }
+        env = os.environ.copy()
+        env['PATH'] = f"{go_path}:{env.get('PATH', '')}"
+        env['GOROOT'] = str(go_root)
         
-        for (Thread thread : threads) {
-            thread.start();
-        }
+        # Run different types of Go tests
+        test_commands = [
+            {
+                'name': 'unit_tests',
+                'command': f'export PATH={go_path}:$PATH && export GOROOT={go_root} && ./go/bin/go test -v -coverprofile=coverage.out ./pkg/... ./cmd/...',
+                'description': 'Unit tests with coverage'
+            },
+            {
+                'name': 'integration_tests',
+                'command': f'export PATH={go_path}:$PATH && export GOROOT={go_root} && ./go/bin/go test -v -tags=integration ./pkg/... ./cmd/...',
+                'description': 'Integration tests'
+            },
+            {
+                'name': 'comprehensive_tests',
+                'command': f'export PATH={go_path}:$PATH && export GOROOT={go_root} && ./go/bin/go test -v -tags=comprehensive ./pkg/... ./cmd/...',
+                'description': 'Comprehensive tests'
+            },
+            {
+                'name': 'performance_tests',
+                'command': f'export PATH={go_path}:$PATH && export GOROOT={go_root} && ./go/bin/go test -v -tags=performance -bench=. ./pkg/... ./cmd/...',
+                'description': 'Performance tests'
+            }
+        ]
         
-        for (Thread thread : threads) {
-            thread.join();
-        }
-    }
-    
-    @Test
-    @DisplayName("Test performance with large number of URLs")
-    void testPerformance() {
-        long startTime = System.currentTimeMillis();
-        
-        for (int i = 0; i < 1000; i++) {
-            String longURL = "https://example.com/url/" + i;
-            String shortURL = service.shortenURL(longURL);
-            service.expandURL(shortURL);
-        }
-        
-        long endTime = System.currentTimeMillis();
-        long duration = endTime - startTime;
-        
-        assertTrue(duration < 5000, "Performance test should complete within 5 seconds");
-    }
-}
-""",
-            "NewsfeedTest.java": """
-package com.podinfo.test;
-
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.DisplayName;
-import static org.junit.jupiter.api.Assertions.*;
-
-public class NewsfeedTest {
-    private NewsfeedService service;
-    
-    @BeforeEach
-    void setUp() {
-        service = new NewsfeedService();
-    }
-    
-    @Test
-    @DisplayName("Test post creation")
-    void testCreatePost() {
-        Post post = service.createPost("Test Title", "Test Content", "testuser");
-        assertNotNull(post);
-        assertEquals("Test Title", post.getTitle());
-        assertEquals("Test Content", post.getContent());
-        assertEquals("testuser", post.getAuthor());
-    }
-    
-    @Test
-    @DisplayName("Test feed retrieval")
-    void testGetFeed() {
-        service.createPost("Post 1", "Content 1", "user1");
-        service.createPost("Post 2", "Content 2", "user2");
-        
-        List<Post> feed = service.getFeed(10);
-        assertEquals(2, feed.size());
-    }
-    
-    @Test
-    @DisplayName("Test concurrent post creation")
-    void testConcurrentPostCreation() throws InterruptedException {
-        int numThreads = 5;
-        Thread[] threads = new Thread[numThreads];
-        
-        for (int i = 0; i < numThreads; i++) {
-            final int threadId = i;
-            threads[i] = new Thread(() -> {
-                service.createPost("Post " + threadId, "Content " + threadId, "user" + threadId);
-            });
-        }
-        
-        for (Thread thread : threads) {
-            thread.start();
-        }
-        
-        for (Thread thread : threads) {
-            thread.join();
-        }
-        
-        List<Post> feed = service.getFeed(10);
-        assertEquals(numThreads, feed.size());
-    }
-}
-""",
-            "LoadBalancerTest.java": """
-package com.podinfo.test;
-
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.DisplayName;
-import static org.junit.jupiter.api.Assertions.*;
-
-public class LoadBalancerTest {
-    private LoadBalancerService service;
-    
-    @BeforeEach
-    void setUp() {
-        String[] servers = {"server1", "server2", "server3"};
-        service = new LoadBalancerService(servers);
-    }
-    
-    @Test
-    @DisplayName("Test round-robin load balancing")
-    void testRoundRobin() {
-        String server1 = service.getNextServer();
-        String server2 = service.getNextServer();
-        String server3 = service.getNextServer();
-        String server4 = service.getNextServer();
-        
-        assertEquals("server1", server1);
-        assertEquals("server2", server2);
-        assertEquals("server3", server3);
-        assertEquals("server1", server4); // Should cycle back
-    }
-    
-    @Test
-    @DisplayName("Test health check functionality")
-    void testHealthCheck() {
-        boolean isHealthy = service.healthCheck("server1");
-        assertTrue(isHealthy);
-    }
-    
-    @Test
-    @DisplayName("Test concurrent load balancing")
-    void testConcurrentLoadBalancing() throws InterruptedException {
-        int numThreads = 10;
-        Thread[] threads = new Thread[numThreads];
-        String[] selectedServers = new String[numThreads];
-        
-        for (int i = 0; i < numThreads; i++) {
-            final int threadId = i;
-            threads[i] = new Thread(() -> {
-                selectedServers[threadId] = service.getNextServer();
-            });
-        }
-        
-        for (Thread thread : threads) {
-            thread.start();
-        }
-        
-        for (Thread thread : threads) {
-            thread.join();
-        }
-        
-        // Verify all servers were selected
-        boolean server1Selected = false, server2Selected = false, server3Selected = false;
-        for (String server : selectedServers) {
-            if ("server1".equals(server)) server1Selected = true;
-            if ("server2".equals(server)) server2Selected = true;
-            if ("server3".equals(server)) server3Selected = true;
-        }
-        
-        assertTrue(server1Selected && server2Selected && server3Selected);
-    }
-}
-"""
-        }
-        
-        # Create test directory
-        test_dir = self.project_root / "java-tests"
-        test_dir.mkdir(exist_ok=True)
-        
-        for filename, content in java_tests.items():
-            test_file = test_dir / filename
-            test_file.write_text(content)
-            print(f"✅ Created {filename}")
-    
-    def update_pom_xml(self):
-        """Update pom.xml with JaCoCo configuration"""
-        print("📝 Updating pom.xml with JaCoCo configuration...")
-        
-        pom_content = """<?xml version="1.0" encoding="UTF-8"?>
-<project xmlns="http://maven.apache.org/POM/4.0.0"
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 
-         http://maven.apache.org/xsd/maven-4.0.0.xsd">
-    <modelVersion>4.0.0</modelVersion>
-    
-    <groupId>com.podinfo</groupId>
-    <artifactId>podinfo-comprehensive-tests</artifactId>
-    <version>1.0.0</version>
-    <packaging>jar</packaging>
-    
-    <properties>
-        <maven.compiler.source>11</maven.compiler.source>
-        <maven.compiler.target>11</maven.compiler.target>
-        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <jacoco.version>0.8.8</jacoco.version>
-    </properties>
-    
-    <dependencies>
-        <dependency>
-            <groupId>org.junit.jupiter</groupId>
-            <artifactId>junit-jupiter-engine</artifactId>
-            <version>5.9.2</version>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.junit.jupiter</groupId>
-            <artifactId>junit-jupiter-api</artifactId>
-            <version>5.9.2</version>
-            <scope>test</scope>
-        </dependency>
-    </dependencies>
-    
-    <build>
-        <plugins>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-surefire-plugin</artifactId>
-                <version>3.0.0-M9</version>
-            </plugin>
+        for test_cmd in test_commands:
+            self.log(f"Running {test_cmd['description']}...")
+            result = self.run_command(test_cmd['command'], timeout=600)
+            self.results['go_tests'][test_cmd['name']] = result
             
-            <plugin>
-                <groupId>org.jacoco</groupId>
-                <artifactId>jacoco-maven-plugin</artifactId>
-                <version>${jacoco.version}</version>
-                <executions>
-                    <execution>
-                        <goals>
-                            <goal>prepare-agent</goal>
-                        </goals>
-                    </execution>
-                    <execution>
-                        <id>report</id>
-                        <phase>test</phase>
-                        <goals>
-                            <goal>report</goal>
-                        </goals>
-                    </execution>
-                </executions>
-            </plugin>
-        </plugins>
-    </build>
-</project>"""
+            if result['success']:
+                self.log(f"✅ {test_cmd['description']} passed")
+            else:
+                self.log(f"❌ {test_cmd['description']} failed: {result['stderr']}", "ERROR")
         
-        pom_file = self.project_root / "pom.xml"
-        pom_file.write_text(pom_content)
-        print("✅ Updated pom.xml with JaCoCo configuration")
+        # Generate coverage report
+        self.log("Generating Go coverage report...")
+        coverage_result = self.run_command(f'export PATH={go_path}:$PATH && export GOROOT={go_root} && ./go/bin/go tool cover -func=coverage.out')
+        if coverage_result['success']:
+            self.results['coverage']['go'] = coverage_result['stdout']
+            self.log("✅ Go coverage report generated")
+        else:
+            self.log("❌ Failed to generate Go coverage report", "ERROR")
     
     def run_java_tests(self):
-        """Run Java tests with Maven"""
-        print("☕ Running Java test suite...")
+        """Run comprehensive Java tests"""
+        self.log("Starting Java test execution...")
         
-        try:
-            # Run Maven tests
-            cmd = ["mvn", "clean", "test", "jacoco:report"]
-            result = subprocess.run(cmd, cwd=self.project_root, capture_output=True, text=True)
+        # Check if Maven is available
+        maven_check = self.run_command("mvn --version")
+        if not maven_check['success']:
+            self.log("Maven not found, skipping Java tests", "WARNING")
+            return
+        
+        # Run Maven tests with JaCoCo
+        java_commands = [
+            {
+                'name': 'unit_tests',
+                'command': 'mvn clean test',
+                'description': 'Java unit tests'
+            },
+            {
+                'name': 'integration_tests',
+                'command': 'mvn clean test -Dtest=*IntegrationTest',
+                'description': 'Java integration tests'
+            },
+            {
+                'name': 'coverage_report',
+                'command': 'mvn clean test jacoco:report',
+                'description': 'Java coverage report with JaCoCo'
+            }
+        ]
+        
+        for test_cmd in java_commands:
+            self.log(f"Running {test_cmd['description']}...")
+            result = self.run_command(test_cmd['command'], timeout=600)
+            self.results['java_tests'][test_cmd['name']] = result
             
-            if result.returncode == 0:
-                print("✅ Java tests completed successfully")
-                self.test_results['java'] = True
-                return True
+            if result['success']:
+                self.log(f"✅ {test_cmd['description']} passed")
             else:
-                print(f"❌ Java tests failed: {result.stderr}")
-                self.test_results['java'] = False
-                return False
-                
-        except Exception as e:
-            print(f"❌ Error running Java tests: {e}")
-            self.test_results['java'] = False
-            return False
-    
-    def check_coverage_report(self):
-        """Check JaCoCo coverage report"""
-        print("📊 Checking coverage report...")
+                self.log(f"❌ {test_cmd['description']} failed: {result['stderr']}", "ERROR")
         
-        jacoco_report = self.project_root / "target" / "site" / "jacoco" / "index.html"
-        
-        if jacoco_report.exists():
-            print(f"✅ Coverage report generated: {jacoco_report}")
-            return True
+        # Check if coverage report was generated
+        coverage_file = self.project_root / "target" / "site" / "jacoco" / "index.html"
+        if coverage_file.exists():
+            self.log("✅ Java coverage report generated at target/site/jacoco/index.html")
+            self.results['coverage']['java'] = str(coverage_file)
         else:
-            print("❌ Coverage report not found")
-            return False
+            self.log("❌ Java coverage report not found", "WARNING")
     
-    def create_comprehensive_test_suite(self):
-        """Create comprehensive test suite for all systems"""
-        print("🧪 Creating comprehensive test suite...")
+    def run_python_tests(self):
+        """Run comprehensive Python tests"""
+        self.log("Starting Python test execution...")
         
-        # Create additional Go test files for better coverage
-        additional_tests = {
-            "pkg/systems/performance_tests.go": """
-package systems
-
-import (
-    "testing"
-    "time"
-)
-
-// TestSystemPerformance - Performance tests for all systems
-func TestSystemPerformance(t *testing.T) {
-    t.Run("TinyURL_Performance", func(t *testing.T) {
-        service := NewTinyURLService()
-        start := time.Now()
+        # Check if pytest is available
+        pytest_check = self.run_command("python3 -m pytest --version")
+        if not pytest_check['success']:
+            self.log("pytest not found, installing requirements...")
+            install_result = self.run_command("pip3 install -r requirements-test.txt")
+            if not install_result['success']:
+                self.log("Failed to install Python test requirements", "ERROR")
+                return
         
-        for i := 0; i < 1000; i++ {
-            longURL := fmt.Sprintf("https://example.com/url/%d", i)
-            shortURL, _ := service.ShortenURL(longURL)
-            service.ExpandURL(shortURL[len("https://tiny.url/"):])
-        }
+        # Run Python tests
+        python_commands = [
+            {
+                'name': 'unit_tests',
+                'command': 'python3 -m pytest test/ -v --cov=. --cov-report=html --cov-report=term',
+                'description': 'Python unit tests with coverage'
+            },
+            {
+                'name': 'integration_tests',
+                'command': 'python3 -m pytest test/ -v -m integration',
+                'description': 'Python integration tests'
+            },
+            {
+                'name': 'performance_tests',
+                'command': 'python3 -m pytest test/ -v -m performance --benchmark-only',
+                'description': 'Python performance tests'
+            }
+        ]
         
-        duration := time.Since(start)
-        t.Logf("TinyURL performance: 1000 operations in %v", duration)
-    })
+        for test_cmd in python_commands:
+            self.log(f"Running {test_cmd['description']}...")
+            result = self.run_command(test_cmd['command'], timeout=600)
+            self.results['python_tests'][test_cmd['name']] = result
+            
+            if result['success']:
+                self.log(f"✅ {test_cmd['description']} passed")
+            else:
+                self.log(f"❌ {test_cmd['description']} failed: {result['stderr']}", "ERROR")
     
-    t.Run("Newsfeed_Performance", func(t *testing.T) {
-        service := NewNewsfeedService()
-        start := time.Now()
+    def run_performance_benchmarks(self):
+        """Run performance benchmarks across all languages"""
+        self.log("Starting performance benchmarks...")
         
-        for i := 0; i < 500; i++ {
-            service.CreatePost(fmt.Sprintf("Post %d", i), "Content", "user")
-        }
+        # Go performance benchmarks
+        go_path = self.project_root / "go" / "bin"
+        go_root = self.project_root / "go"
         
-        duration := time.Since(start)
-        t.Logf("Newsfeed performance: 500 posts in %v", duration)
-    })
+        benchmark_commands = [
+            {
+                'name': 'go_benchmarks',
+                'command': f'export PATH={go_path}:$PATH && export GOROOT={go_root} && ./go/bin/go test -bench=. -benchmem ./pkg/... ./cmd/...',
+                'description': 'Go performance benchmarks'
+            },
+            {
+                'name': 'java_benchmarks',
+                'command': 'mvn test -Dtest=*BenchmarkTest',
+                'description': 'Java performance benchmarks'
+            },
+            {
+                'name': 'python_benchmarks',
+                'command': 'python3 -m pytest test/ -v --benchmark-only --benchmark-sort=mean',
+                'description': 'Python performance benchmarks'
+            }
+        ]
+        
+        for benchmark_cmd in benchmark_commands:
+            self.log(f"Running {benchmark_cmd['description']}...")
+            result = self.run_command(benchmark_cmd['command'], timeout=300)
+            self.results['performance'][benchmark_cmd['name']] = result
+            
+            if result['success']:
+                self.log(f"✅ {benchmark_cmd['description']} completed")
+            else:
+                self.log(f"❌ {benchmark_cmd['description']} failed: {result['stderr']}", "ERROR")
     
-    t.Run("LoadBalancer_Performance", func(t *testing.T) {
-        servers := []string{"server1", "server2", "server3", "server4", "server5"}
-        service := NewLoadBalancerService(servers)
-        start := time.Now()
+    def run_integration_tests(self):
+        """Run cross-language integration tests"""
+        self.log("Starting integration tests...")
         
-        for i := 0; i < 2000; i++ {
-            service.GetNextServer()
-        }
+        integration_commands = [
+            {
+                'name': 'end_to_end',
+                'command': 'python3 -m pytest test/integration/ -v',
+                'description': 'End-to-end integration tests'
+            },
+            {
+                'name': 'system_interaction',
+                'command': 'python3 -m pytest test/integration/system_interaction/ -v',
+                'description': 'System interaction tests'
+            },
+            {
+                'name': 'cross_language',
+                'command': 'python3 -m pytest test/integration/cross_language/ -v',
+                'description': 'Cross-language integration tests'
+            }
+        ]
         
-        duration := time.Since(start)
-        t.Logf("LoadBalancer performance: 2000 requests in %v", duration)
-    })
-}
-""",
-            "pkg/systems/edge_case_tests.go": """
-package systems
-
-import (
-    "testing"
-    "strings"
-)
-
-// TestSystemEdgeCases - Edge case tests for all systems
-func TestSystemEdgeCases(t *testing.T) {
-    t.Run("TinyURL_Edge_Cases", func(t *testing.T) {
-        service := NewTinyURLService()
-        
-        // Test empty URL
-        _, err := service.ShortenURL("")
-        if err == nil {
-            t.Error("Expected error for empty URL")
-        }
-        
-        // Test very long URL
-        longURL := strings.Repeat("a", 10000)
-        shortURL, err := service.ShortenURL(longURL)
-        if err != nil {
-            t.Errorf("Unexpected error for long URL: %v", err)
-        }
-        
-        // Test non-existent short code
-        _, err = service.ExpandURL("nonexistent")
-        if err == nil {
-            t.Error("Expected error for non-existent short code")
-        }
-    })
+        for integration_cmd in integration_commands:
+            self.log(f"Running {integration_cmd['description']}...")
+            result = self.run_command(integration_cmd['command'], timeout=300)
+            self.results['integration'][integration_cmd['name']] = result
+            
+            if result['success']:
+                self.log(f"✅ {integration_cmd['description']} passed")
+            else:
+                self.log(f"❌ {integration_cmd['description']} failed: {result['stderr']}", "ERROR")
     
-    t.Run("Newsfeed_Edge_Cases", func(t *testing.T) {
-        service := NewNewsfeedService()
+    def run_security_tests(self):
+        """Run security tests and vulnerability scans"""
+        self.log("Starting security tests...")
         
-        // Test empty title
-        _, err := service.CreatePost("", "Content", "user")
-        if err == nil {
-            t.Error("Expected error for empty title")
-        }
+        security_commands = [
+            {
+                'name': 'vulnerability_scan',
+                'command': 'trivy fs .',
+                'description': 'Vulnerability scan with Trivy'
+            },
+            {
+                'name': 'dependency_check',
+                'command': 'mvn org.owasp:dependency-check-maven:check',
+                'description': 'Dependency vulnerability check'
+            },
+            {
+                'name': 'code_analysis',
+                'command': 'gosec ./...',
+                'description': 'Go security analysis'
+            }
+        ]
         
-        // Test very long content
-        longContent := strings.Repeat("a", 100000)
-        post, err := service.CreatePost("Title", longContent, "user")
-        if err != nil {
-            t.Errorf("Unexpected error for long content: %v", err)
-        }
-        
-        if post == nil {
-            t.Error("Expected post to be created")
-        }
-    })
-}
-""",
-            "pkg/systems/integration_tests.go": """
-package systems
-
-import (
-    "testing"
-    "time"
-)
-
-// TestSystemIntegration - Integration tests for all systems
-func TestSystemIntegration(t *testing.T) {
-    t.Run("Full_System_Integration", func(t *testing.T) {
-        // Initialize all services
-        tinyURLService := NewTinyURLService()
-        newsfeedService := NewNewsfeedService()
-        docsService := NewGoogleDocsService()
-        loadBalancerService := NewLoadBalancerService([]string{"server1", "server2"})
-        monitoringService := NewMonitoringService()
-        
-        // Test cross-system integration
-        // 1. Create a post
-        post, err := newsfeedService.CreatePost("Integration Test", "Content", "user")
-        if err != nil {
-            t.Fatalf("Failed to create post: %v", err)
-        }
-        
-        // 2. Create a document
-        doc, err := docsService.CreateDocument("Integration Doc", "user")
-        if err != nil {
-            t.Fatalf("Failed to create document: %v", err)
-        }
-        
-        // 3. Shorten URLs for both
-        postURL, err := tinyURLService.ShortenURL(fmt.Sprintf("https://newsfeed.com/posts/%s", post.ID))
-        if err != nil {
-            t.Fatalf("Failed to shorten post URL: %v", err)
-        }
-        
-        docURL, err := tinyURLService.ShortenURL(fmt.Sprintf("https://docs.com/documents/%s", doc.ID))
-        if err != nil {
-            t.Fatalf("Failed to shorten document URL: %v", err)
-        }
-        
-        // 4. Load balance requests
-        server1 := loadBalancerService.GetNextServer()
-        server2 := loadBalancerService.GetNextServer()
-        
-        // 5. Monitor the system
-        monitoringService.RecordMetric("posts_created", 1)
-        monitoringService.RecordMetric("documents_created", 1)
-        monitoringService.RecordMetric("urls_shortened", 2)
-        monitoringService.CreateAlert("Integration test completed", "info")
-        
-        // Verify integration
-        if server1 == server2 {
-            t.Error("Load balancer should return different servers")
-        }
-        
-        metrics := monitoringService.GetMetrics()
-        if len(metrics) != 3 {
-            t.Errorf("Expected 3 metrics, got %d", len(metrics))
-        }
-        
-        alerts := monitoringService.GetAlerts()
-        if len(alerts) != 1 {
-            t.Errorf("Expected 1 alert, got %d", len(alerts))
-        }
-        
-        t.Log("✅ Full system integration test completed successfully")
-    })
-}
-"""
-        }
-        
-        for filepath, content in additional_tests.items():
-            file_path = self.project_root / filepath
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            file_path.write_text(content)
-            print(f"✅ Created {filepath}")
+        for security_cmd in security_commands:
+            self.log(f"Running {security_cmd['description']}...")
+            result = self.run_command(security_cmd['command'], timeout=300)
+            self.results['security'][security_cmd['name']] = result
+            
+            if result['success']:
+                self.log(f"✅ {security_cmd['description']} completed")
+            else:
+                self.log(f"❌ {security_cmd['description']} failed: {result['stderr']}", "ERROR")
     
-    def run_comprehensive_tests(self):
-        """Run comprehensive test suite"""
-        print("🚀 Running comprehensive test suite...")
+    def generate_report(self):
+        """Generate comprehensive test report"""
+        self.log("Generating comprehensive test report...")
         
-        # Run Go tests
-        if not self.run_go_tests():
-            return False
+        end_time = time.time()
+        total_duration = end_time - self.start_time
         
-        # Create Java test files
-        self.create_java_test_files()
+        # Calculate summary statistics
+        total_tests = 0
+        passed_tests = 0
+        failed_tests = 0
         
-        # Update pom.xml
-        self.update_pom_xml()
+        for category in ['go_tests', 'java_tests', 'python_tests']:
+            for test_name, result in self.results[category].items():
+                total_tests += 1
+                if result['success']:
+                    passed_tests += 1
+                else:
+                    failed_tests += 1
         
-        # Run Java tests
-        if not self.run_java_tests():
-            return False
-        
-        # Check coverage report
-        if not self.check_coverage_report():
-            return False
-        
-        return True
-    
-    def generate_final_report(self):
-        """Generate final comprehensive report"""
-        print("📊 Generating final comprehensive report...")
-        
-        report = {
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "test_results": self.test_results,
-            "coverage_results": self.coverage_results,
-            "overall_coverage": self.coverage_results.get('go', 0.0),
-            "status": "COMPREHENSIVE_IMPLEMENTATION_COMPLETE"
+        self.results['summary'] = {
+            'total_duration': total_duration,
+            'total_tests': total_tests,
+            'passed_tests': passed_tests,
+            'failed_tests': failed_tests,
+            'success_rate': (passed_tests / total_tests * 100) if total_tests > 0 else 0,
+            'timestamp': time.strftime("%Y-%m-%d %H:%M:%S")
         }
         
-        report_file = self.project_root / "comprehensive_test_report.json"
+        # Save detailed report
+        report_file = self.project_root / "test_report.json"
         with open(report_file, 'w') as f:
-            json.dump(report, f, indent=2)
+            json.dump(self.results, f, indent=2)
         
-        print(f"✅ Final report generated: {report_file}")
-        return report
+        # Print summary
+        self.log("=" * 60)
+        self.log("COMPREHENSIVE TEST EXECUTION SUMMARY")
+        self.log("=" * 60)
+        self.log(f"Total Duration: {total_duration:.2f} seconds")
+        self.log(f"Total Tests: {total_tests}")
+        self.log(f"Passed Tests: {passed_tests}")
+        self.log(f"Failed Tests: {failed_tests}")
+        self.log(f"Success Rate: {self.results['summary']['success_rate']:.2f}%")
+        self.log(f"Detailed Report: {report_file}")
+        self.log("=" * 60)
+        
+        return self.results['summary']['success_rate']
     
-    def run(self):
-        """Main execution method"""
-        print("🎯 Starting Comprehensive Test Coverage and Systems Implementation")
-        print("=" * 80)
+    def run_all_tests(self):
+        """Run all comprehensive tests"""
+        self.log("Starting comprehensive test orchestration...")
         
-        # Create comprehensive test suite
-        self.create_comprehensive_test_suite()
-        
-        # Run comprehensive tests
-        if not self.run_comprehensive_tests():
-            print("❌ Comprehensive test suite failed")
-            return False
+        # Run tests in parallel where possible
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            # Submit test categories
+            futures = {
+                executor.submit(self.run_go_tests): 'go_tests',
+                executor.submit(self.run_java_tests): 'java_tests',
+                executor.submit(self.run_python_tests): 'python_tests',
+                executor.submit(self.run_performance_benchmarks): 'performance',
+                executor.submit(self.run_integration_tests): 'integration',
+                executor.submit(self.run_security_tests): 'security'
+            }
+            
+            # Wait for completion
+            for future in as_completed(futures):
+                category = futures[future]
+                try:
+                    future.result()
+                    self.log(f"✅ {category} completed")
+                except Exception as e:
+                    self.log(f"❌ {category} failed: {str(e)}", "ERROR")
         
         # Generate final report
-        report = self.generate_final_report()
+        success_rate = self.generate_report()
         
-        print("=" * 80)
-        print("🎉 COMPREHENSIVE IMPLEMENTATION COMPLETE!")
-        print(f"📊 Overall Coverage: {report['overall_coverage']}%")
-        print(f"✅ Test Results: {report['test_results']}")
-        print(f"📈 Coverage Results: {report['coverage_results']}")
-        print("=" * 80)
+        if success_rate >= 90:
+            self.log("🎉 Excellent! Test success rate is 90% or higher!")
+        elif success_rate >= 80:
+            self.log("✅ Good! Test success rate is 80% or higher!")
+        elif success_rate >= 70:
+            self.log("⚠️  Warning! Test success rate is below 80%")
+        else:
+            self.log("❌ Critical! Test success rate is below 70%", "ERROR")
         
-        return True
+        return success_rate
+
+def main():
+    parser = argparse.ArgumentParser(description='Comprehensive Test Orchestration System')
+    parser.add_argument('--go-only', action='store_true', help='Run only Go tests')
+    parser.add_argument('--java-only', action='store_true', help='Run only Java tests')
+    parser.add_argument('--python-only', action='store_true', help='Run only Python tests')
+    parser.add_argument('--performance-only', action='store_true', help='Run only performance tests')
+    parser.add_argument('--integration-only', action='store_true', help='Run only integration tests')
+    parser.add_argument('--security-only', action='store_true', help='Run only security tests')
+    
+    args = parser.parse_args()
+    
+    orchestrator = TestOrchestrator()
+    
+    if args.go_only:
+        orchestrator.run_go_tests()
+    elif args.java_only:
+        orchestrator.run_java_tests()
+    elif args.python_only:
+        orchestrator.run_python_tests()
+    elif args.performance_only:
+        orchestrator.run_performance_benchmarks()
+    elif args.integration_only:
+        orchestrator.run_integration_tests()
+    elif args.security_only:
+        orchestrator.run_security_tests()
+    else:
+        # Run all tests
+        success_rate = orchestrator.run_all_tests()
+        sys.exit(0 if success_rate >= 80 else 1)
 
 if __name__ == "__main__":
-    test_comprehensive = TestComprehensive()
-    success = test_comprehensive.run()
-    sys.exit(0 if success else 1)
+    main()

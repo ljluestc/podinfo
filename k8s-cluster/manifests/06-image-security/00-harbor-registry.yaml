@@ -1,0 +1,368 @@
+---
+# Harbor Container Registry - Comprehensive Deployment
+# Harbor provides enterprise-grade container registry with:
+# - Integrated Trivy vulnerability scanning
+# - Image signing and verification
+# - RBAC and project management
+# - Audit logging
+# - Replication and backup
+
+# Installation via Helm is recommended:
+# helm repo add harbor https://helm.gke.io/harbor
+# helm install harbor harbor/harbor \
+#   --namespace harbor-system \
+#   --create-namespace \
+#   --set expose.type=ingress \
+#   --set expose.ingress.hosts.core=harbor.example.com \
+#   --set externalURL=https://harbor.example.com \
+#   --set harborAdminPassword=HarborAdmin123 \
+#   --set trivy.enabled=true \
+#   --set notary.enabled=true \
+#   --set persistence.enabled=true \
+#   --set persistence.persistentVolumeClaim.registry.size=100Gi \
+#   --set persistence.persistentVolumeClaim.database.size=10Gi
+
+---
+# Namespace for Harbor
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: harbor-system
+  labels:
+    name: harbor-system
+    security.kubernetes.io/enforce: restricted
+
+---
+# Harbor Admin Secret
+apiVersion: v1
+kind: Secret
+metadata:
+  name: harbor-admin-secret
+  namespace: harbor-system
+type: Opaque
+stringData:
+  # Change this password in production!
+  HARBOR_ADMIN_PASSWORD: "HarborAdmin123"
+  # Database password
+  POSTGRESQL_PASSWORD: "changeit"
+  # Redis password
+  REDIS_PASSWORD: "changeit"
+
+---
+# Harbor Core Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: harbor-core
+  namespace: harbor-system
+  labels:
+    app: harbor
+    component: core
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP
+      name: http
+  selector:
+    app: harbor
+    component: core
+
+---
+# Harbor Registry Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: harbor-registry
+  namespace: harbor-system
+  labels:
+    app: harbor
+    component: registry
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5000
+      targetPort: 5000
+      protocol: TCP
+      name: registry
+  selector:
+    app: harbor
+    component: registry
+
+---
+# Harbor Ingress
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: harbor-ingress
+  namespace: harbor-system
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - harbor.example.com
+    secretName: harbor-tls
+  rules:
+  - host: harbor.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: harbor-core
+            port:
+              number: 80
+
+---
+# Harbor ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: harbor-config
+  namespace: harbor-system
+data:
+  # Harbor configuration
+  config.yaml: |
+    hostname: harbor.example.com
+    external_url: https://harbor.example.com
+
+    # HTTP settings
+    http:
+      port: 8080
+
+    # HTTPS is handled by ingress
+
+    # Harbor admin password
+    harbor_admin_password: HarborAdmin123
+
+    # Database settings
+    database:
+      type: postgresql
+      postgresql:
+        host: harbor-database
+        port: 5432
+        database: registry
+        username: postgres
+        password: changeit
+        ssl_mode: disable
+        max_idle_conns: 50
+        max_open_conns: 1000
+
+    # Redis settings
+    redis:
+      host: harbor-redis
+      port: 6379
+      password: changeit
+      registry_db_index: 1
+      jobservice_db_index: 2
+      chartmuseum_db_index: 3
+      trivy_db_index: 5
+
+    # Storage settings
+    storage_service:
+      filesystem:
+        rootdirectory: /storage
+        maxthreads: 100
+
+    # Log settings
+    log:
+      level: info
+      local:
+        rotation_count: 50
+        rotation_size: 200M
+        location: /var/log/harbor
+
+    # Trivy settings
+    trivy:
+      ignore_unfixed: false
+      skip_update: false
+      insecure: false
+      github_token: ""
+
+    # Notary settings for image signing
+    notary:
+      url: https://notary.example.com
+
+---
+# PersistentVolumeClaim for Harbor Registry
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: harbor-registry-pvc
+  namespace: harbor-system
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: fast-ssd
+  resources:
+    requests:
+      storage: 100Gi
+
+---
+# PersistentVolumeClaim for Harbor Database
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: harbor-database-pvc
+  namespace: harbor-system
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: fast-ssd
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+# Harbor ServiceAccount
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: harbor
+  namespace: harbor-system
+automountServiceAccountToken: true
+
+---
+# Harbor RBAC - ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: harbor-scanner
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "endpoints"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["batch"]
+  resources: ["jobs", "cronjobs"]
+  verbs: ["get", "list", "watch"]
+
+---
+# Harbor RBAC - ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: harbor-scanner-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: harbor-scanner
+subjects:
+- kind: ServiceAccount
+  name: harbor
+  namespace: harbor-system
+
+---
+# NetworkPolicy for Harbor
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: harbor-network-policy
+  namespace: harbor-system
+spec:
+  podSelector:
+    matchLabels:
+      app: harbor
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 8080
+  - from:
+    - podSelector:
+        matchLabels:
+          app: harbor
+    ports:
+    - protocol: TCP
+      port: 5000
+    - protocol: TCP
+      port: 5432
+    - protocol: TCP
+      port: 6379
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: harbor
+    ports:
+    - protocol: TCP
+      port: 5000
+    - protocol: TCP
+      port: 5432
+    - protocol: TCP
+      port: 6379
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 80
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
+
+---
+# Pod Security Policy for Harbor (if PSP is enabled)
+apiVersion: policy/v1beta1
+kind: PodSecurityPolicy
+metadata:
+  name: harbor-psp
+spec:
+  privileged: false
+  allowPrivilegeEscalation: false
+  requiredDropCapabilities:
+    - ALL
+  volumes:
+    - 'configMap'
+    - 'emptyDir'
+    - 'projected'
+    - 'secret'
+    - 'persistentVolumeClaim'
+  hostNetwork: false
+  hostIPC: false
+  hostPID: false
+  runAsUser:
+    rule: 'MustRunAsNonRoot'
+  seLinux:
+    rule: 'RunAsAny'
+  supplementalGroups:
+    rule: 'RunAsAny'
+  fsGroup:
+    rule: 'RunAsAny'
+  readOnlyRootFilesystem: false
+
+---
+# ServiceMonitor for Harbor metrics
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: harbor-metrics
+  namespace: harbor-system
+  labels:
+    app: harbor
+spec:
+  selector:
+    matchLabels:
+      app: harbor
+  endpoints:
+  - port: metrics
+    interval: 30s
+    path: /metrics

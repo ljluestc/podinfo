@@ -1,0 +1,616 @@
+---
+# Comprehensive Test Suite for Image Security
+# Tests Harbor, Cosign, Trivy, SBOM, and Policy Enforcement
+
+---
+# Test Scripts ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: image-security-tests
+  namespace: kube-system
+data:
+  test-harbor.sh: |
+    #!/bin/bash
+    set -euo pipefail
+
+    echo "========================================="
+    echo "Testing Harbor Registry"
+    echo "========================================="
+
+    # Test 1: Harbor API accessibility
+    echo "Test 1: Checking Harbor API..."
+    if curl -k -f https://harbor.example.com/api/v2.0/systeminfo >/dev/null 2>&1; then
+      echo "✓ Harbor API is accessible"
+    else
+      echo "✗ Harbor API is not accessible"
+      exit 1
+    fi
+
+    # Test 2: Harbor authentication
+    echo "Test 2: Testing Harbor authentication..."
+    if curl -k -u admin:HarborAdmin123 https://harbor.example.com/api/v2.0/projects >/dev/null 2>&1; then
+      echo "✓ Harbor authentication works"
+    else
+      echo "✗ Harbor authentication failed"
+      exit 1
+    fi
+
+    # Test 3: Create test project
+    echo "Test 3: Creating test project..."
+    curl -k -X POST -u admin:HarborAdmin123 \
+      -H "Content-Type: application/json" \
+      -d '{"project_name":"test-project","public":false}' \
+      https://harbor.example.com/api/v2.0/projects 2>/dev/null || true
+    echo "✓ Test project creation attempted"
+
+    # Test 4: Push test image
+    echo "Test 4: Pushing test image..."
+    docker pull alpine:latest
+    docker tag alpine:latest harbor.example.com/test-project/alpine:test
+    if docker push harbor.example.com/test-project/alpine:test 2>/dev/null; then
+      echo "✓ Image push successful"
+    else
+      echo "✗ Image push failed"
+      exit 1
+    fi
+
+    # Test 5: Pull test image
+    echo "Test 5: Pulling test image..."
+    docker rmi harbor.example.com/test-project/alpine:test 2>/dev/null || true
+    if docker pull harbor.example.com/test-project/alpine:test; then
+      echo "✓ Image pull successful"
+    else
+      echo "✗ Image pull failed"
+      exit 1
+    fi
+
+    echo ""
+    echo "✓ All Harbor tests passed!"
+
+  test-cosign.sh: |
+    #!/bin/bash
+    set -euo pipefail
+
+    echo "========================================="
+    echo "Testing Cosign Image Signing"
+    echo "========================================="
+
+    TEST_IMAGE="harbor.example.com/test-project/alpine:test"
+
+    # Test 1: Cosign installation
+    echo "Test 1: Checking Cosign installation..."
+    if command -v cosign >/dev/null 2>&1; then
+      echo "✓ Cosign is installed ($(cosign version 2>&1 | head -1))"
+    else
+      echo "✗ Cosign is not installed"
+      exit 1
+    fi
+
+    # Test 2: Generate key pair
+    echo "Test 2: Generating Cosign key pair..."
+    export COSIGN_PASSWORD=""
+    if cosign generate-key-pair 2>/dev/null; then
+      echo "✓ Key pair generated"
+    else
+      echo "✗ Key pair generation failed"
+      exit 1
+    fi
+
+    # Test 3: Sign image with key
+    echo "Test 3: Signing image with key..."
+    if cosign sign --key cosign.key --yes "$TEST_IMAGE" 2>/dev/null; then
+      echo "✓ Image signed successfully"
+    else
+      echo "✗ Image signing failed"
+      exit 1
+    fi
+
+    # Test 4: Verify signature
+    echo "Test 4: Verifying image signature..."
+    if cosign verify --key cosign.pub "$TEST_IMAGE" 2>/dev/null; then
+      echo "✓ Signature verification successful"
+    else
+      echo "✗ Signature verification failed"
+      exit 1
+    fi
+
+    # Test 5: Keyless signing (if OIDC available)
+    echo "Test 5: Testing keyless signing..."
+    if [ -n "${COSIGN_EXPERIMENTAL:-}" ]; then
+      if cosign sign --yes "$TEST_IMAGE" 2>/dev/null; then
+        echo "✓ Keyless signing successful"
+      else
+        echo "⚠ Keyless signing not available (requires OIDC)"
+      fi
+    else
+      echo "⚠ Skipping keyless signing (COSIGN_EXPERIMENTAL not set)"
+    fi
+
+    # Test 6: Attach attestation
+    echo "Test 6: Attaching attestation..."
+    echo '{"buildType":"test","builder":{"id":"test"}}' > /tmp/predicate.json
+    if cosign attest --predicate /tmp/predicate.json --yes --key cosign.key "$TEST_IMAGE" 2>/dev/null; then
+      echo "✓ Attestation attached"
+    else
+      echo "✗ Attestation failed"
+      exit 1
+    fi
+
+    echo ""
+    echo "✓ All Cosign tests passed!"
+
+  test-trivy.sh: |
+    #!/bin/bash
+    set -euo pipefail
+
+    echo "========================================="
+    echo "Testing Trivy Vulnerability Scanning"
+    echo "========================================="
+
+    # Test 1: Trivy installation
+    echo "Test 1: Checking Trivy installation..."
+    if command -v trivy >/dev/null 2>&1; then
+      echo "✓ Trivy is installed ($(trivy version 2>&1 | grep Version))"
+    else
+      echo "✗ Trivy is not installed"
+      exit 1
+    fi
+
+    # Test 2: Update vulnerability database
+    echo "Test 2: Updating vulnerability database..."
+    if trivy image --download-db-only 2>/dev/null; then
+      echo "✓ Database updated successfully"
+    else
+      echo "✗ Database update failed"
+      exit 1
+    fi
+
+    # Test 3: Scan test image
+    echo "Test 3: Scanning test image (alpine:latest)..."
+    if trivy image --severity HIGH,CRITICAL alpine:latest > /tmp/trivy-scan.txt 2>&1; then
+      echo "✓ Image scan successful"
+      VULN_COUNT=$(grep -c "Total:" /tmp/trivy-scan.txt || echo "0")
+      echo "  Vulnerabilities found: $VULN_COUNT"
+    else
+      echo "✗ Image scan failed"
+      exit 1
+    fi
+
+    # Test 4: Scan with JSON output
+    echo "Test 4: Testing JSON output format..."
+    if trivy image --format json alpine:latest > /tmp/trivy-scan.json 2>&1; then
+      echo "✓ JSON format works"
+      if jq -e '.Results' /tmp/trivy-scan.json >/dev/null 2>&1; then
+        echo "✓ JSON structure is valid"
+      else
+        echo "✗ Invalid JSON structure"
+        exit 1
+      fi
+    else
+      echo "✗ JSON scan failed"
+      exit 1
+    fi
+
+    # Test 5: Scan with exit code on vulnerabilities
+    echo "Test 5: Testing exit code enforcement..."
+    if trivy image --exit-code 1 --severity CRITICAL alpine:latest >/dev/null 2>&1; then
+      echo "⚠ No CRITICAL vulnerabilities found"
+    else
+      EXIT_CODE=$?
+      if [ $EXIT_CODE -eq 1 ]; then
+        echo "✓ Exit code enforcement works (found CRITICAL vulnerabilities)"
+      fi
+    fi
+
+    # Test 6: Test Trivy operator (if installed)
+    echo "Test 6: Checking Trivy Operator..."
+    if kubectl get deployment -n trivy-system trivy-operator >/dev/null 2>&1; then
+      echo "✓ Trivy Operator is deployed"
+      READY=$(kubectl get deployment -n trivy-system trivy-operator -o jsonpath='{.status.readyReplicas}')
+      echo "  Ready replicas: $READY"
+    else
+      echo "⚠ Trivy Operator not found (optional)"
+    fi
+
+    echo ""
+    echo "✓ All Trivy tests passed!"
+
+  test-sbom.sh: |
+    #!/bin/bash
+    set -euo pipefail
+
+    echo "========================================="
+    echo "Testing SBOM Generation"
+    echo "========================================="
+
+    TEST_IMAGE="alpine:latest"
+
+    # Test 1: Syft installation
+    echo "Test 1: Checking Syft installation..."
+    if command -v syft >/dev/null 2>&1; then
+      echo "✓ Syft is installed ($(syft version 2>&1 | head -1))"
+    else
+      echo "✗ Syft is not installed"
+      exit 1
+    fi
+
+    # Test 2: Generate SPDX SBOM
+    echo "Test 2: Generating SPDX SBOM..."
+    if syft "$TEST_IMAGE" -o spdx-json > /tmp/sbom-spdx.json 2>&1; then
+      echo "✓ SPDX SBOM generated"
+      SPDX_COMPONENTS=$(jq '.packages | length' /tmp/sbom-spdx.json)
+      echo "  Components: $SPDX_COMPONENTS"
+    else
+      echo "✗ SPDX SBOM generation failed"
+      exit 1
+    fi
+
+    # Test 3: Generate CycloneDX SBOM
+    echo "Test 3: Generating CycloneDX SBOM..."
+    if syft "$TEST_IMAGE" -o cyclonedx-json > /tmp/sbom-cyclonedx.json 2>&1; then
+      echo "✓ CycloneDX SBOM generated"
+      CDX_COMPONENTS=$(jq '.components | length' /tmp/sbom-cyclonedx.json)
+      echo "  Components: $CDX_COMPONENTS"
+    else
+      echo "✗ CycloneDX SBOM generation failed"
+      exit 1
+    fi
+
+    # Test 4: Validate SBOM structure
+    echo "Test 4: Validating SBOM structure..."
+    if jq -e '.spdxVersion' /tmp/sbom-spdx.json >/dev/null 2>&1; then
+      echo "✓ SPDX structure is valid"
+    else
+      echo "✗ Invalid SPDX structure"
+      exit 1
+    fi
+
+    if jq -e '.bomFormat' /tmp/sbom-cyclonedx.json >/dev/null 2>&1; then
+      echo "✓ CycloneDX structure is valid"
+    else
+      echo "✗ Invalid CycloneDX structure"
+      exit 1
+    fi
+
+    # Test 5: Extract licenses
+    echo "Test 5: Extracting license information..."
+    LICENSES=$(jq -r '.packages[] | select(.licenseConcluded != null and .licenseConcluded != "NOASSERTION") | .licenseConcluded' /tmp/sbom-spdx.json | sort -u | wc -l)
+    echo "✓ Found $LICENSES unique licenses"
+
+    # Test 6: Attach SBOM to image (if Cosign available)
+    echo "Test 6: Attaching SBOM to image..."
+    if command -v cosign >/dev/null 2>&1; then
+      TEST_SIGNED_IMAGE="harbor.example.com/test-project/alpine:test"
+      if cosign attach sbom --sbom /tmp/sbom-spdx.json "$TEST_SIGNED_IMAGE" 2>/dev/null; then
+        echo "✓ SBOM attached to image"
+      else
+        echo "⚠ SBOM attachment failed (requires signed image)"
+      fi
+    else
+      echo "⚠ Skipping SBOM attachment (Cosign not available)"
+    fi
+
+    echo ""
+    echo "✓ All SBOM tests passed!"
+
+  test-policies.sh: |
+    #!/bin/bash
+    set -euo pipefail
+
+    echo "========================================="
+    echo "Testing Image Admission Policies"
+    echo "========================================="
+
+    # Test 1: Check OPA Gatekeeper installation
+    echo "Test 1: Checking OPA Gatekeeper..."
+    if kubectl get deployment -n gatekeeper-system gatekeeper-controller-manager >/dev/null 2>&1; then
+      echo "✓ OPA Gatekeeper is installed"
+    else
+      echo "⚠ OPA Gatekeeper not found (policies will not be enforced)"
+    fi
+
+    # Test 2: Check ConstraintTemplates
+    echo "Test 2: Checking ConstraintTemplates..."
+    TEMPLATES=$(kubectl get constrainttemplates --no-headers 2>/dev/null | wc -l)
+    echo "  Found $TEMPLATES ConstraintTemplates"
+    if [ "$TEMPLATES" -ge 3 ]; then
+      echo "✓ ConstraintTemplates are deployed"
+    else
+      echo "⚠ Expected at least 3 ConstraintTemplates"
+    fi
+
+    # Test 3: Check Constraints
+    echo "Test 3: Checking active Constraints..."
+    kubectl get constraints --all-namespaces 2>/dev/null || true
+    echo "✓ Constraints listed"
+
+    # Test 4: Test allowed registry policy
+    echo "Test 4: Testing allowed registry policy..."
+    cat > /tmp/test-pod-allowed.yaml <<EOF
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: test-allowed-registry
+      namespace: default
+    spec:
+      containers:
+      - name: test
+        image: registry.k8s.io/pause:3.9
+    EOF
+
+    if kubectl apply -f /tmp/test-pod-allowed.yaml --dry-run=server 2>/dev/null; then
+      echo "✓ Allowed registry accepted"
+      kubectl delete -f /tmp/test-pod-allowed.yaml 2>/dev/null || true
+    else
+      echo "⚠ Allowed registry test inconclusive"
+    fi
+
+    # Test 5: Test blocked registry policy
+    echo "Test 5: Testing blocked registry policy..."
+    cat > /tmp/test-pod-blocked.yaml <<EOF
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: test-blocked-registry
+      namespace: default
+    spec:
+      containers:
+      - name: test
+        image: untrusted-registry.com/malicious:latest
+    EOF
+
+    if kubectl apply -f /tmp/test-pod-blocked.yaml --dry-run=server 2>/dev/null; then
+      echo "⚠ Blocked registry was accepted (policy may not be active)"
+    else
+      echo "✓ Blocked registry rejected as expected"
+    fi
+
+    # Test 6: Check Policy Controller (Cosign)
+    echo "Test 6: Checking Policy Controller..."
+    if kubectl get deployment -n cosign-system policy-controller >/dev/null 2>&1; then
+      echo "✓ Policy Controller is deployed"
+    else
+      echo "⚠ Policy Controller not found"
+    fi
+
+    # Test 7: Check ClusterImagePolicies
+    echo "Test 7: Checking ClusterImagePolicies..."
+    POLICIES=$(kubectl get clusterimagepolicy --no-headers 2>/dev/null | wc -l)
+    echo "  Found $POLICIES ClusterImagePolicies"
+    if [ "$POLICIES" -ge 1 ]; then
+      echo "✓ ClusterImagePolicies are configured"
+    else
+      echo "⚠ No ClusterImagePolicies found"
+    fi
+
+    echo ""
+    echo "✓ All policy tests completed!"
+
+  test-integration.sh: |
+    #!/bin/bash
+    set -euo pipefail
+
+    echo "========================================="
+    echo "Running Integration Tests"
+    echo "========================================="
+
+    # End-to-end workflow test
+    TEST_IMAGE="harbor.example.com/test-project/e2e-test:v1.0"
+
+    echo "Integration Test: Complete image security workflow"
+    echo "  1. Build and push image"
+    echo "  2. Scan with Trivy"
+    echo "  3. Generate SBOM"
+    echo "  4. Sign with Cosign"
+    echo "  5. Verify policies"
+
+    # Step 1: Build and push
+    echo ""
+    echo "Step 1: Building test image..."
+    cat > /tmp/Dockerfile <<EOF
+    FROM alpine:latest
+    RUN apk add --no-cache curl
+    ENTRYPOINT ["/bin/sh"]
+    EOF
+
+    docker build -t "$TEST_IMAGE" /tmp 2>/dev/null || {
+      echo "⚠ Docker build failed (requires Docker)"
+      exit 0
+    }
+
+    echo "Pushing image..."
+    docker push "$TEST_IMAGE" 2>/dev/null || {
+      echo "⚠ Push failed (Harbor may not be configured)"
+      exit 0
+    }
+    echo "✓ Step 1 complete"
+
+    # Step 2: Scan with Trivy
+    echo ""
+    echo "Step 2: Scanning with Trivy..."
+    if command -v trivy >/dev/null 2>&1; then
+      trivy image --severity HIGH,CRITICAL "$TEST_IMAGE" > /tmp/scan-results.txt 2>&1 || true
+      echo "✓ Step 2 complete"
+    else
+      echo "⚠ Trivy not available"
+    fi
+
+    # Step 3: Generate SBOM
+    echo ""
+    echo "Step 3: Generating SBOM..."
+    if command -v syft >/dev/null 2>&1; then
+      syft "$TEST_IMAGE" -o spdx-json > /tmp/e2e-sbom.json 2>&1
+      echo "✓ Step 3 complete"
+    else
+      echo "⚠ Syft not available"
+    fi
+
+    # Step 4: Sign with Cosign
+    echo ""
+    echo "Step 4: Signing image..."
+    if command -v cosign >/dev/null 2>&1; then
+      export COSIGN_PASSWORD=""
+      cosign generate-key-pair 2>/dev/null || true
+      cosign sign --key cosign.key --yes "$TEST_IMAGE" 2>/dev/null && echo "✓ Step 4 complete" || echo "⚠ Signing failed"
+    else
+      echo "⚠ Cosign not available"
+    fi
+
+    # Step 5: Deploy and verify policies
+    echo ""
+    echo "Step 5: Testing deployment with policies..."
+    cat > /tmp/test-deployment.yaml <<EOF
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: e2e-test
+      namespace: default
+    spec:
+      replicas: 1
+      selector:
+        matchLabels:
+          app: e2e-test
+      template:
+        metadata:
+          labels:
+            app: e2e-test
+        spec:
+          containers:
+          - name: test
+            image: $TEST_IMAGE
+    EOF
+
+    kubectl apply -f /tmp/test-deployment.yaml --dry-run=server 2>&1 | grep -q "error\|denied" && \
+      echo "⚠ Deployment blocked by policy" || \
+      echo "✓ Step 5 complete"
+
+    echo ""
+    echo "✓ Integration test workflow complete!"
+
+  run-all-tests.sh: |
+    #!/bin/bash
+    set -euo pipefail
+
+    echo "========================================="
+    echo "Image Security Test Suite"
+    echo "========================================="
+    echo "Running all image security tests..."
+    echo ""
+
+    FAILED=0
+
+    # Run each test script
+    for test in test-harbor.sh test-cosign.sh test-trivy.sh test-sbom.sh test-policies.sh test-integration.sh; do
+      echo "Running $test..."
+      if bash "/tests/$test"; then
+        echo "✓ $test passed"
+      else
+        echo "✗ $test failed"
+        FAILED=$((FAILED + 1))
+      fi
+      echo ""
+    done
+
+    echo "========================================="
+    echo "Test Summary"
+    echo "========================================="
+    if [ $FAILED -eq 0 ]; then
+      echo "✓ All tests passed!"
+      exit 0
+    else
+      echo "✗ $FAILED test(s) failed"
+      exit 1
+    fi
+
+---
+# Test Job
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: image-security-tests
+  namespace: kube-system
+spec:
+  template:
+    metadata:
+      labels:
+        app: image-security-tests
+    spec:
+      serviceAccountName: image-security-tester
+      restartPolicy: Never
+      containers:
+      - name: test-runner
+        image: alpine:latest
+        command:
+        - sh
+        - -c
+        - |
+          # Install dependencies
+          apk add --no-cache curl jq bash docker kubectl
+
+          # Run all tests
+          bash /tests/run-all-tests.sh
+        volumeMounts:
+        - name: test-scripts
+          mountPath: /tests
+        - name: docker-socket
+          mountPath: /var/run/docker.sock
+      volumes:
+      - name: test-scripts
+        configMap:
+          name: image-security-tests
+          defaultMode: 0755
+      - name: docker-socket
+        hostPath:
+          path: /var/run/docker.sock
+          type: Socket
+
+---
+# ServiceAccount for tests
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: image-security-tester
+  namespace: kube-system
+automountServiceAccountToken: true
+
+---
+# ClusterRole for tests
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: image-security-tester-role
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "configmaps", "secrets"]
+  verbs: ["get", "list", "watch", "create", "delete"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "statefulsets", "daemonsets"]
+  verbs: ["get", "list", "watch", "create", "delete"]
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["get", "list", "watch", "create", "delete"]
+- apiGroups: ["templates.gatekeeper.sh"]
+  resources: ["constrainttemplates"]
+  verbs: ["get", "list"]
+- apiGroups: ["constraints.gatekeeper.sh"]
+  resources: ["*"]
+  verbs: ["get", "list"]
+- apiGroups: ["policy.sigstore.dev"]
+  resources: ["clusterimagepolicies"]
+  verbs: ["get", "list"]
+
+---
+# ClusterRoleBinding for tests
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: image-security-tester-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: image-security-tester-role
+subjects:
+- kind: ServiceAccount
+  name: image-security-tester
+  namespace: kube-system

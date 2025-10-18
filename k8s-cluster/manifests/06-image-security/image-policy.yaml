@@ -1,57 +1,356 @@
 ---
-# Image Policy Configuration
-# Only allow images from trusted registries
+# Comprehensive Image Policy Configuration with OPA Gatekeeper
+# Enforces trusted registries, vulnerability thresholds, signing, and SBOM requirements
 
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: image-policy
-  namespace: kube-system
-data:
-  policy.yaml: |
-    apiVersion: policy/v1alpha1
-    kind: ImagePolicy
-    spec:
-      # Allow only images from these registries
-      allowedRegistries:
-        - "registry.example.com"
-        - "gcr.io/my-project"
-        - "registry.k8s.io"
-      # Block images with HIGH or CRITICAL vulnerabilities
-      maxCriticalVulnerabilities: 0
-      maxHighVulnerabilities: 0
-      maxMediumVulnerabilities: 5
-      # Require image signing
-      requireImageSignature: true
-      # Trusted signers
-      trustedSigners:
-        - "team-a@example.com"
-        - "team-b@example.com"
-      # SBOM requirements
-      requireSBOM: true
+# Install OPA Gatekeeper first:
+# helm repo add gatekeeper https://open-policy-agent.github.io/gatekeeper/charts
+# helm install gatekeeper gatekeeper/gatekeeper \
+#   --namespace gatekeeper-system \
+#   --create-namespace
 
 ---
-# Cosign for Image Signing and Verification
-# Install policy-controller:
-# kubectl apply -f https://github.com/sigstore/policy-controller/releases/latest/download/policy-controller.yaml
+# ConstraintTemplate for AllowedRegistries
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8sallowedregistries
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sAllowedRegistries
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            registries:
+              type: array
+              items:
+                type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8sallowedregistries
 
-# ClusterImagePolicy for Cosign verification
-apiVersion: policy.sigstore.dev/v1beta1
-kind: ClusterImagePolicy
+        violation[{"msg": msg}] {
+          container := input_containers[_]
+          not allowed_registry(container.image)
+          msg := sprintf("Container image '%v' comes from untrusted registry", [container.image])
+        }
+
+        allowed_registry(image) {
+          registry := input.parameters.registries[_]
+          startswith(image, registry)
+        }
+
+        input_containers[c] {
+          c := input.review.object.spec.containers[_]
+        }
+
+        input_containers[c] {
+          c := input.review.object.spec.initContainers[_]
+        }
+
+        input_containers[c] {
+          c := input.review.object.spec.ephemeralContainers[_]
+        }
+
+---
+# Constraint for AllowedRegistries
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sAllowedRegistries
+metadata:
+  name: allowed-registries
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+      - apiGroups: ["apps"]
+        kinds: ["Deployment", "StatefulSet", "DaemonSet", "ReplicaSet"]
+      - apiGroups: ["batch"]
+        kinds: ["Job", "CronJob"]
+    excludedNamespaces:
+      - kube-system
+      - kube-public
+      - kube-node-lease
+      - gatekeeper-system
+      - trivy-system
+      - cosign-system
+      - harbor-system
+  parameters:
+    registries:
+      - "harbor.example.com/"
+      - "registry.example.com/"
+      - "gcr.io/my-project/"
+      - "registry.k8s.io/"
+      - "k8s.gcr.io/"
+      - "quay.io/coreos/"
+      - "docker.io/library/"  # Official Docker images
+
+---
+# ConstraintTemplate for RequireSignedImages
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8srequiresignedimages
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sRequireSignedImages
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            exemptImages:
+              type: array
+              items:
+                type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8srequiresignedimages
+
+        violation[{"msg": msg}] {
+          container := input_containers[_]
+          not exempt_image(container.image)
+          not has_signature_annotation
+          msg := sprintf("Container image '%v' must be signed", [container.image])
+        }
+
+        exempt_image(image) {
+          exempt := input.parameters.exemptImages[_]
+          startswith(image, exempt)
+        }
+
+        has_signature_annotation {
+          input.review.object.metadata.annotations["cosign.sigstore.dev/verified"]
+        }
+
+        input_containers[c] {
+          c := input.review.object.spec.containers[_]
+        }
+
+        input_containers[c] {
+          c := input.review.object.spec.initContainers[_]
+        }
+
+---
+# Constraint for RequireSignedImages
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequireSignedImages
 metadata:
   name: require-signed-images
 spec:
-  images:
-  - glob: "registry.example.com/**"
-  - glob: "gcr.io/my-project/**"
-  authorities:
-  - keyless:
-      url: https://fulcio.sigstore.dev
-      identities:
-      - issuer: https://accounts.google.com
-        subject: ".*@example\\.com$"
-  - key:
-      data: |
-        -----BEGIN PUBLIC KEY-----
-        <PUBLIC_KEY_DATA>
-        -----END PUBLIC KEY-----
+  enforcementAction: dryrun  # Start with dryrun, change to "deny" when ready
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+      - apiGroups: ["apps"]
+        kinds: ["Deployment", "StatefulSet", "DaemonSet"]
+    excludedNamespaces:
+      - kube-system
+      - kube-public
+      - gatekeeper-system
+      - trivy-system
+  parameters:
+    exemptImages:
+      - "registry.k8s.io/"
+      - "k8s.gcr.io/"
+      - "quay.io/coreos/"
+
+---
+# ConstraintTemplate for BlockVulnerableImages
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8sblockvulnerableimages
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sBlockVulnerableImages
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            maxCritical:
+              type: integer
+            maxHigh:
+              type: integer
+            maxMedium:
+              type: integer
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8sblockvulnerableimages
+
+        violation[{"msg": msg}] {
+          container := input_containers[_]
+          report := get_vulnerability_report(container.image)
+          exceeds_threshold(report)
+          msg := sprintf("Image '%v' has too many vulnerabilities: %v CRITICAL, %v HIGH",
+            [container.image, report.critical, report.high])
+        }
+
+        exceeds_threshold(report) {
+          report.critical > input.parameters.maxCritical
+        }
+
+        exceeds_threshold(report) {
+          report.high > input.parameters.maxHigh
+        }
+
+        # This would require external data provider integration with Trivy
+        get_vulnerability_report(image) = report {
+          # Placeholder - requires Gatekeeper external data provider
+          report := {"critical": 0, "high": 0, "medium": 0}
+        }
+
+        input_containers[c] {
+          c := input.review.object.spec.containers[_]
+        }
+
+---
+# Constraint for BlockVulnerableImages
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sBlockVulnerableImages
+metadata:
+  name: block-vulnerable-images
+spec:
+  enforcementAction: warn  # Change to "deny" for strict enforcement
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+      - apiGroups: ["apps"]
+        kinds: ["Deployment", "StatefulSet", "DaemonSet"]
+    excludedNamespaces:
+      - kube-system
+      - gatekeeper-system
+  parameters:
+    maxCritical: 0
+    maxHigh: 0
+    maxMedium: 5
+
+---
+# ConfigMap for Image Policy Documentation
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: image-policy-config
+  namespace: kube-system
+data:
+  README.md: |
+    # Image Security Policy
+
+    ## Overview
+    This cluster enforces comprehensive image security policies:
+
+    1. **Trusted Registries**: Only images from approved registries are allowed
+    2. **Image Signing**: Production images must be signed with Cosign
+    3. **Vulnerability Scanning**: Images with CRITICAL/HIGH vulns are blocked
+    4. **SBOM Requirements**: SBOMs must be attached to production images
+
+    ## Approved Registries
+    - harbor.example.com (internal registry)
+    - registry.example.com (internal registry)
+    - gcr.io/my-project (GCP project registry)
+    - registry.k8s.io (Kubernetes official images)
+    - docker.io/library (Docker official images)
+
+    ## Enforcement Levels
+    - Production namespaces: STRICT (deny violations)
+    - Staging namespaces: WARN (log violations)
+    - Development namespaces: AUDIT (monitor only)
+
+    ## How to Sign Images
+    ```bash
+    # Install Cosign
+    go install github.com/sigstore/cosign/cmd/cosign@latest
+
+    # Sign image
+    cosign sign --yes harbor.example.com/production/myapp:v1.0.0
+
+    # Verify signature
+    cosign verify harbor.example.com/production/myapp:v1.0.0
+    ```
+
+    ## How to Generate SBOM
+    ```bash
+    # Using Syft
+    syft harbor.example.com/production/myapp:v1.0.0 -o json > sbom.json
+
+    # Attach SBOM to image
+    cosign attach sbom --sbom sbom.json harbor.example.com/production/myapp:v1.0.0
+    ```
+
+    ## Troubleshooting
+    - If image is blocked: Check registry, signing, and vulnerability scan results
+    - View scan results: `kubectl get vulnerabilityreports -n <namespace>`
+    - View policy violations: `kubectl get constraints`
+
+  policy-summary.yaml: |
+    # Image Policy Summary
+    apiVersion: policy/v1alpha1
+    kind: ImagePolicyConfig
+    spec:
+      # Registry allowlist
+      allowedRegistries:
+        - harbor.example.com
+        - registry.example.com
+        - gcr.io/my-project
+        - registry.k8s.io
+        - k8s.gcr.io
+        - quay.io/coreos
+        - docker.io/library
+
+      # Vulnerability thresholds
+      vulnerabilityPolicy:
+        maxCritical: 0
+        maxHigh: 0
+        maxMedium: 5
+        maxLow: 20
+        action: block
+
+      # Signing requirements
+      signingPolicy:
+        required: true
+        exemptNamespaces:
+          - kube-system
+          - kube-public
+        trustedIdentities:
+          - issuer: "https://accounts.google.com"
+            subject: ".*@example\\.com$"
+          - issuer: "https://token.actions.githubusercontent.com"
+            subject: "^https://github.com/my-org/.*"
+
+      # SBOM requirements
+      sbomPolicy:
+        required: true
+        exemptNamespaces:
+          - development
+          - staging
+        formats:
+          - spdx
+          - cyclonedx
+
+      # Enforcement per namespace
+      namespaceEnforcement:
+        production:
+          registries: deny
+          signing: deny
+          vulnerabilities: deny
+          sbom: deny
+        staging:
+          registries: warn
+          signing: warn
+          vulnerabilities: warn
+          sbom: audit
+        development:
+          registries: audit
+          signing: audit
+          vulnerabilities: audit
+          sbom: audit

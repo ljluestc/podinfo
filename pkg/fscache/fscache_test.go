@@ -11,16 +11,17 @@ import (
 func TestNewWatch(t *testing.T) {
 	// Create a temporary directory for testing
 	tempDir := t.TempDir()
-	
+
 	watcher, err := NewWatch(tempDir)
 	if err != nil {
 		t.Fatalf("NewWatch failed: %v", err)
 	}
-	
+	defer watcher.Close()
+
 	if watcher == nil {
 		t.Fatal("NewWatch returned nil")
 	}
-	
+
 	if watcher.dir != tempDir {
 		t.Errorf("Expected watcher directory %s, got %s", tempDir, watcher.dir)
 	}
@@ -48,7 +49,8 @@ func TestWatcher_UpdateCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWatch failed: %v", err)
 	}
-	
+	defer watcher.Close()
+
 	// Create a test file
 	testFile := filepath.Join(tempDir, "test.txt")
 	testContent := "test content"
@@ -77,7 +79,8 @@ func TestWatcher_CacheOperations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWatch failed: %v", err)
 	}
-	
+	defer watcher.Close()
+
 	// Test cache operations
 	key := "test-key"
 	value := "test-value"
@@ -107,7 +110,8 @@ func TestWatcher_ConcurrentAccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWatch failed: %v", err)
 	}
-	
+	defer watcher.Close()
+
 	// Test concurrent cache operations
 	done := make(chan bool, 10)
 	
@@ -142,7 +146,8 @@ func TestWatcher_FileSystemIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWatch failed: %v", err)
 	}
-	
+	defer watcher.Close()
+
 	// Create multiple test files
 	testFiles := map[string]string{
 		"file1.txt": "content 1",
@@ -180,7 +185,8 @@ func TestWatcher_FileDeletion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWatch failed: %v", err)
 	}
-	
+	defer watcher.Close()
+
 	// Create a test file
 	testFile := filepath.Join(tempDir, "test.txt")
 	testContent := "test content"
@@ -224,7 +230,8 @@ func TestWatcher_LargeFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWatch failed: %v", err)
 	}
-	
+	defer watcher.Close()
+
 	// Create a large file (1MB)
 	largeContent := make([]byte, 1024*1024)
 	for i := range largeContent {
@@ -257,7 +264,8 @@ func TestWatcher_SpecialCharacters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWatch failed: %v", err)
 	}
-	
+	defer watcher.Close()
+
 	// Test with special characters in filename
 	specialFiles := map[string]string{
 		"file with spaces.txt": "content with spaces",
@@ -296,7 +304,8 @@ func TestWatcher_Watch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWatch failed: %v", err)
 	}
-	
+	defer watcher.Close()
+
 	// Start watching
 	watcher.Watch()
 	

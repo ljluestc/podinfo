@@ -1,99 +1,199 @@
-# Makefile for releasing podinfo
-#
-# The release version is controlled from pkg/version
+# Makefile for Comprehensive Test Coverage and CI/CD Pipeline
 
-TAG?=latest
-NAME:=podinfo
-DOCKER_REPOSITORY:=stefanprodan
-DOCKER_IMAGE_NAME:=$(DOCKER_REPOSITORY)/$(NAME)
-GIT_COMMIT:=$(shell git describe --dirty --always)
-VERSION:=$(shell grep 'VERSION' pkg/version/version.go | awk '{ print $$4 }' | tr -d '"')
-EXTRA_RUN_ARGS?=
+.PHONY: help test test-unit test-integration test-comprehensive test-java coverage coverage-html coverage-report lint security build clean install-tools pre-commit ci-cd
 
-run:
-	go run -ldflags "-s -w -X github.com/stefanprodan/podinfo/pkg/version.REVISION=$(GIT_COMMIT)" cmd/podinfo/* \
-	--level=debug --grpc-port=9999 --backend-url=https://httpbin.org/status/401 --backend-url=https://httpbin.org/status/500 \
-	--ui-logo=https://raw.githubusercontent.com/stefanprodan/podinfo/gh-pages/cuddle_clap.gif $(EXTRA_RUN_ARGS)
+# Default target
+help:
+	@echo "Available targets:"
+	@echo "  test                 - Run all tests"
+	@echo "  test-unit           - Run unit tests"
+	@echo "  test-integration    - Run integration tests"
+	@echo "  test-comprehensive  - Run comprehensive tests"
+	@echo "  test-java           - Run Java tests"
+	@echo "  coverage            - Generate coverage report"
+	@echo "  coverage-html       - Generate HTML coverage report"
+	@echo "  coverage-report     - Generate detailed coverage report"
+	@echo "  lint                - Run linter"
+	@echo "  security            - Run security scan"
+	@echo "  build               - Build application"
+	@echo "  clean               - Clean build artifacts"
+	@echo "  install-tools       - Install required tools"
+	@echo "  pre-commit          - Run pre-commit checks"
+	@echo "  ci-cd               - Run full CI/CD pipeline"
 
-.PHONY: test
-test: tidy fmt vet
-	go test ./... -coverprofile cover.out
+# Test targets
+test: test-unit test-integration test-comprehensive test-java
 
+test-unit:
+	@echo "🧪 Running unit tests..."
+	go test -v -race -coverprofile=coverage.out ./pkg/... ./cmd/...
+
+test-integration:
+	@echo "🔗 Running integration tests..."
+	go test -v -tags=integration -coverprofile=integration.out ./test/...
+
+test-comprehensive:
+	@echo "🎯 Running comprehensive tests..."
+	go test -v -tags=comprehensive -coverprofile=comprehensive.out ./pkg/... ./cmd/...
+
+test-java:
+	@echo "☕ Running Java tests..."
+	@if [ -f "pom.xml" ]; then \
+		mvn test; \
+	else \
+		echo "No pom.xml found, skipping Java tests"; \
+	fi
+
+# Coverage targets
+coverage: test-unit
+	@echo "📊 Generating coverage report..."
+	go tool cover -func=coverage.out
+
+coverage-html: test-unit
+	@echo "📊 Generating HTML coverage report..."
+	go tool cover -html=coverage.out -o coverage.html
+	@echo "Coverage report generated: coverage.html"
+
+coverage-report: test-unit
+	@echo "📊 Generating detailed coverage report..."
+	go tool cover -func=coverage.out | tee coverage.txt
+	@echo "Coverage report saved to: coverage.txt"
+
+# Quality targets
+lint:
+	@echo "🔍 Running linter..."
+	@if command -v golangci-lint >/dev/null 2>&1; then \
+		golangci-lint run; \
+	else \
+		echo "golangci-lint not installed, skipping linter"; \
+	fi
+
+security:
+	@echo "🔒 Running security scan..."
+	@if command -v gosec >/dev/null 2>&1; then \
+		gosec ./...; \
+	else \
+		echo "gosec not installed, skipping security scan"; \
+	fi
+
+# Build targets
 build:
-	GIT_COMMIT=$$(git rev-list -1 HEAD) && CGO_ENABLED=0 go build  -ldflags "-s -w -X github.com/stefanprodan/podinfo/pkg/version.REVISION=$(GIT_COMMIT)" -a -o ./bin/podinfo ./cmd/podinfo/*
-	GIT_COMMIT=$$(git rev-list -1 HEAD) && CGO_ENABLED=0 go build  -ldflags "-s -w -X github.com/stefanprodan/podinfo/pkg/version.REVISION=$(GIT_COMMIT)" -a -o ./bin/podcli ./cmd/podcli/*
+	@echo "🏗️  Building application..."
+	go build -v -ldflags="-X main.version=$(shell git rev-parse HEAD)" -o bin/podinfo ./cmd/podinfo
+	go build -v -ldflags="-X main.version=$(shell git rev-parse HEAD)" -o bin/podcli ./cmd/podcli
+	@echo "Build completed: bin/podinfo, bin/podcli"
 
-tidy:
-	rm -f go.sum; go mod tidy -compat=1.25
+# Clean targets
+clean:
+	@echo "🧹 Cleaning build artifacts..."
+	rm -rf bin/
+	rm -f coverage.out coverage.html coverage.txt integration.out comprehensive.out
+	rm -rf target/
+	@echo "Clean completed"
 
-vet:
-	go vet ./...
+# Tool installation
+install-tools:
+	@echo "🛠️  Installing required tools..."
+	@if ! command -v golangci-lint >/dev/null 2>&1; then \
+		echo "Installing golangci-lint..."; \
+		curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.54.2; \
+	fi
+	@if ! command -v gosec >/dev/null 2>&1; then \
+		echo "Installing gosec..."; \
+		go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest; \
+	fi
+	@if ! command -v bc >/dev/null 2>&1; then \
+		echo "Installing bc..."; \
+		sudo apt-get update && sudo apt-get install -y bc; \
+	fi
+	@echo "Tools installation completed"
 
-fmt:
-	go fmt ./...
+# Pre-commit checks
+pre-commit:
+	@echo "🔍 Running pre-commit checks..."
+	@./.git/hooks/pre-commit
 
-build-charts:
-	helm lint charts/*
-	helm package charts/*
+# Full CI/CD pipeline
+ci-cd: install-tools lint security test coverage-html build
+	@echo "🎉 CI/CD pipeline completed successfully!"
 
-build-container:
-	docker build -t $(DOCKER_IMAGE_NAME):$(VERSION) .
+# Docker targets
+docker-build:
+	@echo "🐳 Building Docker image..."
+	docker build -t podinfo:latest .
+	docker build -t podinfo:$(shell git rev-parse --short HEAD) .
 
-build-xx:
-	docker buildx build \
-	--platform=linux/amd64 \
-	-t $(DOCKER_IMAGE_NAME):$(VERSION) \
-	--load \
-	-f Dockerfile.xx .
+docker-test:
+	@echo "🐳 Running tests in Docker..."
+	docker run --rm -v $(PWD):/app -w /app golang:1.21.5 make test
 
-build-base:
-	docker build -f Dockerfile.base -t $(DOCKER_REPOSITORY)/podinfo-base:latest .
+# Performance testing
+benchmark:
+	@echo "⚡ Running benchmarks..."
+	go test -bench=. -benchmem ./pkg/... ./cmd/...
 
-push-base: build-base
-	docker push $(DOCKER_REPOSITORY)/podinfo-base:latest
+# Memory profiling
+profile-mem:
+	@echo "📊 Running memory profiling..."
+	go test -memprofile=mem.prof ./pkg/... ./cmd/...
+	go tool pprof mem.prof
 
-test-container:
-	@docker rm -f podinfo || true
-	@docker run -dp 9898:9898 --name=podinfo $(DOCKER_IMAGE_NAME):$(VERSION)
-	@docker ps
-	@TOKEN=$$(curl -sd 'test' localhost:9898/token | jq -r .token) && \
-	curl -sH "Authorization: Bearer $${TOKEN}" localhost:9898/token/validate | grep test
+# CPU profiling
+profile-cpu:
+	@echo "📊 Running CPU profiling..."
+	go test -cpuprofile=cpu.prof ./pkg/... ./cmd/...
+	go tool pprof cpu.prof
 
-push-container:
-	docker tag $(DOCKER_IMAGE_NAME):$(VERSION) $(DOCKER_IMAGE_NAME):latest
-	docker push $(DOCKER_IMAGE_NAME):$(VERSION)
-	docker push $(DOCKER_IMAGE_NAME):latest
-	docker tag $(DOCKER_IMAGE_NAME):$(VERSION) quay.io/$(DOCKER_IMAGE_NAME):$(VERSION)
-	docker tag $(DOCKER_IMAGE_NAME):$(VERSION) quay.io/$(DOCKER_IMAGE_NAME):latest
-	docker push quay.io/$(DOCKER_IMAGE_NAME):$(VERSION)
-	docker push quay.io/$(DOCKER_IMAGE_NAME):latest
+# Race detection
+race:
+	@echo "🏃 Running race detection..."
+	go test -race ./pkg/... ./cmd/...
 
-version-set:
-	@next="$(TAG)" && \
-	current="$(VERSION)" && \
-	/usr/bin/sed -i '' "s/$$current/$$next/g" pkg/version/version.go && \
-	/usr/bin/sed -i '' "s/tag: $$current/tag: $$next/g" charts/podinfo/values.yaml && \
-	/usr/bin/sed -i '' "s/tag: $$current/tag: $$next/g" charts/podinfo/values-prod.yaml && \
-	/usr/bin/sed -i '' "s/appVersion: $$current/appVersion: $$next/g" charts/podinfo/Chart.yaml && \
-	/usr/bin/sed -i '' "s/version: $$current/version: $$next/g" charts/podinfo/Chart.yaml && \
-	/usr/bin/sed -i '' "s/podinfo:$$current/podinfo:$$next/g" kustomize/deployment.yaml && \
-	/usr/bin/sed -i '' "s/podinfo:$$current/podinfo:$$next/g" deploy/webapp/frontend/deployment.yaml && \
-	/usr/bin/sed -i '' "s/podinfo:$$current/podinfo:$$next/g" deploy/webapp/backend/deployment.yaml && \
-	/usr/bin/sed -i '' "s/podinfo:$$current/podinfo:$$next/g" deploy/bases/frontend/deployment.yaml && \
-	/usr/bin/sed -i '' "s/podinfo:$$current/podinfo:$$next/g" deploy/bases/backend/deployment.yaml && \
-	/usr/bin/sed -i '' "s/$$current/$$next/g" timoni/podinfo/values.cue && \
-	echo "Version $$next set in code, deployment, module, chart and kustomize"
+# Generate test coverage badge
+coverage-badge:
+	@echo "📊 Generating coverage badge..."
+	@COVERAGE=$$(go tool cover -func=coverage.out | grep total | awk '{print $$3}' | sed 's/%//'); \
+	echo "Coverage: $$COVERAGE%"; \
+	curl -s "https://img.shields.io/badge/coverage-$$COVERAGE%25-brightgreen" > coverage-badge.svg
 
-release:
-	git tag -s -m $(VERSION) $(VERSION)
-	git push origin $(VERSION)
+# Generate test report
+test-report:
+	@echo "📊 Generating test report..."
+	@mkdir -p reports
+	@go test -v -json ./pkg/... ./cmd/... > reports/test-results.json
+	@echo "Test report generated: reports/test-results.json"
 
-swagger:
-	go install github.com/swaggo/swag/cmd/swag@latest
-	go get github.com/swaggo/swag/gen@latest
-	go get github.com/swaggo/swag/cmd/swag@latest
-	cd pkg/api/http && $$(go env GOPATH)/bin/swag init -g server.go
+# Check dependencies
+deps-check:
+	@echo "📦 Checking dependencies..."
+	go mod verify
+	go mod tidy
+	@if [ "$$(git diff --exit-code)" != "0" ]; then \
+		echo "Dependencies need to be updated"; \
+		exit 1; \
+	fi
 
-.PHONY: timoni-build
-timoni-build:
-	@timoni build podinfo ./timoni/podinfo -f ./timoni/podinfo/debug_values.cue
+# Format code
+format:
+	@echo "🎨 Formatting code..."
+	gofmt -s -w .
+	goimports -w .
+
+# Generate documentation
+docs:
+	@echo "📚 Generating documentation..."
+	godoc -http=:6060 &
+	@echo "Documentation server started at http://localhost:6060"
+
+# Run all quality checks
+quality: format lint security test coverage-html
+	@echo "✅ All quality checks completed!"
+
+# Continuous testing (watch mode)
+watch:
+	@echo "👀 Watching for changes..."
+	@if command -v entr >/dev/null 2>&1; then \
+		find . -name "*.go" | entr -c make test; \
+	else \
+		echo "entr not installed, install with: sudo apt-get install entr"; \
+	fi

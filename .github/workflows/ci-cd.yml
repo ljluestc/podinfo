@@ -1,0 +1,504 @@
+name: Comprehensive Test Coverage and CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    - cron: '0 2 * * *'  # Daily at 2 AM UTC
+
+env:
+  GO_VERSION: '1.21.5'
+  COVERAGE_THRESHOLD: 100.0
+
+jobs:
+  test:
+    name: Comprehensive Test Suite
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        go-version: ['1.21.5', '1.22.0']
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ matrix.go-version }}
+        
+    - name: Cache Go modules
+      uses: actions/cache@v3
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+          
+    - name: Install dependencies
+      run: |
+        go mod download
+        go mod verify
+        
+    - name: Run unit tests
+      run: |
+        go test -v -race -coverprofile=coverage.out ./pkg/... ./cmd/...
+        
+    - name: Run integration tests
+      run: |
+        go test -v -tags=integration -coverprofile=integration.out ./test/...
+        
+    - name: Run comprehensive tests
+      run: |
+        go test -v -tags=comprehensive -coverprofile=comprehensive.out ./pkg/... ./cmd/...
+        
+    - name: Generate coverage report
+      run: |
+        go tool cover -func=coverage.out
+        go tool cover -html=coverage.out -o coverage.html
+        
+    - name: Check coverage threshold
+      run: |
+        COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print $3}' | sed 's/%//')
+        echo "Current coverage: $COVERAGE%"
+        if (( $(echo "$COVERAGE < $COVERAGE_THRESHOLD" | bc -l) )); then
+          echo "Coverage $COVERAGE% is below threshold $COVERAGE_THRESHOLD%"
+          exit 1
+        fi
+        
+    - name: Upload coverage reports
+      uses: actions/upload-artifact@v3
+      with:
+        name: coverage-reports
+        path: |
+          coverage.out
+          coverage.html
+          integration.out
+          comprehensive.out
+          
+  java-tests:
+    name: Java Test Suite
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up JDK 11
+      uses: actions/setup-java@v3
+      with:
+        java-version: '11'
+        distribution: 'temurin'
+
+    - name: Cache Maven dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.m2
+        key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+        restore-keys: |
+          ${{ runner.os }}-m2-
+
+    - name: Run Maven tests with coverage
+      run: |
+        mvn clean verify
+
+    - name: Verify 100% coverage
+      run: |
+        echo "JaCoCo configured to enforce 100% coverage (LINE, BRANCH, METHOD)"
+        echo "If build passed, coverage is at 100%"
+
+    - name: Upload JaCoCo reports
+      uses: actions/upload-artifact@v3
+      with:
+        name: jacoco-reports
+        path: target/site/jacoco/
+
+    - name: Upload JaCoCo coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        files: target/site/jacoco/jacoco.xml
+        flags: java
+        name: java-coverage
+
+  python-tests:
+    name: Python Test Suite
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.10', '3.11']
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements-test.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements-test.txt
+
+    - name: Run pytest with coverage
+      run: |
+        pytest test_comprehensive.py --cov=. --cov-report=xml --cov-report=term --cov-fail-under=100 -v
+
+    - name: Upload Python coverage reports
+      uses: actions/upload-artifact@v3
+      with:
+        name: python-coverage-${{ matrix.python-version }}
+        path: |
+          coverage.xml
+          htmlcov/
+
+    - name: Upload Python coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        files: coverage.xml
+        flags: python
+        name: python-coverage-${{ matrix.python-version }}
+        
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Run Gosec Security Scanner
+      uses: securecodewarrior/github-action-gosec@master
+      with:
+        args: '-fmt sarif -out results.sarif ./...'
+        
+    - name: Upload SARIF file
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: results.sarif
+        
+  quality:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        
+    - name: Run golangci-lint
+      uses: golangci/golangci-lint-action@v3
+      with:
+        version: latest
+        args: --timeout=5m
+        
+    - name: Run go vet
+      run: go vet ./...
+      
+    - name: Run go fmt check
+      run: |
+        if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then
+          echo "The following files are not formatted:"
+          gofmt -s -l .
+          exit 1
+        fi
+        
+    - name: Run go mod tidy check
+      run: |
+        go mod tidy
+        if [ "$(git diff --exit-code)" != "0" ]; then
+          echo "go.mod or go.sum needs to be updated"
+          exit 1
+        fi
+        
+  coverage-summary:
+    name: Coverage Summary Report
+    runs-on: ubuntu-latest
+    needs: [test, java-tests, python-tests]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download all coverage artifacts
+      uses: actions/download-artifact@v3
+
+    - name: Generate coverage summary
+      run: |
+        echo "## Coverage Summary Report" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Go Coverage" >> $GITHUB_STEP_SUMMARY
+        if [ -f coverage-reports/coverage.out ]; then
+          go tool cover -func=coverage-reports/coverage.out | tail -1 >> $GITHUB_STEP_SUMMARY
+        fi
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Java Coverage" >> $GITHUB_STEP_SUMMARY
+        echo "JaCoCo enforces 100% LINE, BRANCH, and METHOD coverage" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Python Coverage" >> $GITHUB_STEP_SUMMARY
+        echo "pytest enforces 100% coverage with --cov-fail-under=100" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "✅ **All coverage thresholds met!**" >> $GITHUB_STEP_SUMMARY
+
+    - name: Upload combined coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        flags: combined
+        name: combined-coverage
+
+  build:
+    name: Build and Package
+    runs-on: ubuntu-latest
+    needs: [test, java-tests, python-tests, security, quality, coverage-summary]
+
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Build application
+      run: |
+        go build -v -ldflags="-X main.version=${{ github.sha }}" ./cmd/podinfo
+        go build -v -ldflags="-X main.version=${{ github.sha }}" ./cmd/podcli
+
+    - name: Build Docker image
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        docker build -t podinfo:${{ github.sha }} .
+        docker build -t podinfo:latest .
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: build-${{ matrix.os }}
+        path: |
+          podinfo
+          podcli
+
+  image-security:
+    name: Image Security Scanning
+    runs-on: ubuntu-latest
+    needs: [build]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Build Docker image for scanning
+      run: |
+        docker build -t podinfo:scan-${{ github.sha }} .
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: podinfo:scan-${{ github.sha }}
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+        severity: 'CRITICAL,HIGH'
+        exit-code: '1'  # Fail on CRITICAL or HIGH vulnerabilities
+
+    - name: Upload Trivy results to GitHub Security
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+    - name: Run Trivy JSON scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: podinfo:scan-${{ github.sha }}
+        format: 'json'
+        output: 'trivy-results.json'
+
+    - name: Generate SBOM with Syft
+      uses: anchore/sbom-action@v0
+      with:
+        image: podinfo:scan-${{ github.sha }}
+        format: spdx-json
+        output-file: sbom-spdx.json
+
+    - name: Generate SBOM in CycloneDX format
+      uses: anchore/sbom-action@v0
+      with:
+        image: podinfo:scan-${{ github.sha }}
+        format: cyclonedx-json
+        output-file: sbom-cyclonedx.json
+
+    - name: Install Cosign
+      uses: sigstore/cosign-installer@v3
+
+    - name: Sign container image
+      if: github.ref == 'refs/heads/main'
+      env:
+        COSIGN_EXPERIMENTAL: "true"
+      run: |
+        cosign sign --yes podinfo:scan-${{ github.sha }}
+
+    - name: Attach SBOM to image
+      if: github.ref == 'refs/heads/main'
+      run: |
+        cosign attach sbom --sbom sbom-spdx.json podinfo:scan-${{ github.sha }}
+
+    - name: Generate attestation
+      if: github.ref == 'refs/heads/main'
+      env:
+        COSIGN_EXPERIMENTAL: "true"
+      run: |
+        cosign attest --yes \
+          --predicate sbom-spdx.json \
+          --type https://spdx.dev/Document \
+          podinfo:scan-${{ github.sha }}
+
+    - name: Validate SBOM quality
+      run: |
+        COMPONENT_COUNT=$(jq '.packages | length' sbom-spdx.json)
+        echo "SBOM Components: $COMPONENT_COUNT"
+        if [ "$COMPONENT_COUNT" -lt 10 ]; then
+          echo "❌ SBOM quality check failed: Too few components ($COMPONENT_COUNT < 10)"
+          exit 1
+        fi
+        echo "✅ SBOM quality check passed"
+
+    - name: Scan for license compliance
+      run: |
+        echo "Scanning licenses in SBOM..."
+        jq -r '.packages[] | select(.licenseConcluded != null and .licenseConcluded != "NOASSERTION") | .licenseConcluded' sbom-spdx.json | sort -u > licenses.txt
+
+        # Check for blocked licenses
+        BLOCKED_LICENSES="GPL-3.0 AGPL-3.0 SSPL-1.0"
+        for license in $BLOCKED_LICENSES; do
+          if grep -q "$license" licenses.txt; then
+            echo "❌ Blocked license detected: $license"
+            exit 1
+          fi
+        done
+        echo "✅ No blocked licenses found"
+
+    - name: Upload security artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: image-security-reports
+        path: |
+          trivy-results.sarif
+          trivy-results.json
+          sbom-spdx.json
+          sbom-cyclonedx.json
+          licenses.txt
+
+    - name: Generate security summary
+      if: always()
+      run: |
+        echo "## Image Security Scan Results" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Vulnerability Scan" >> $GITHUB_STEP_SUMMARY
+        if [ -f trivy-results.json ]; then
+          CRITICAL=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy-results.json)
+          HIGH=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH")] | length' trivy-results.json)
+          MEDIUM=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="MEDIUM")] | length' trivy-results.json)
+          echo "- CRITICAL: $CRITICAL" >> $GITHUB_STEP_SUMMARY
+          echo "- HIGH: $HIGH" >> $GITHUB_STEP_SUMMARY
+          echo "- MEDIUM: $MEDIUM" >> $GITHUB_STEP_SUMMARY
+        fi
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### SBOM Generation" >> $GITHUB_STEP_SUMMARY
+        if [ -f sbom-spdx.json ]; then
+          COMPONENTS=$(jq '.packages | length' sbom-spdx.json)
+          echo "- Components: $COMPONENTS" >> $GITHUB_STEP_SUMMARY
+          echo "- Format: SPDX 2.3, CycloneDX 1.4" >> $GITHUB_STEP_SUMMARY
+        fi
+        echo "" >> $GITHUB_STEP_SUMMARY
+        if [ "${{ github.ref }}" == "refs/heads/main" ]; then
+          echo "### Image Signing" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Image signed with Cosign" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ SBOM attached to image" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Attestation generated" >> $GITHUB_STEP_SUMMARY
+        fi
+          
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: [build, image-security]
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Deploy to staging
+      run: |
+        echo "Deploying to staging environment..."
+        # Add deployment logic here
+        
+    - name: Run smoke tests
+      run: |
+        echo "Running smoke tests..."
+        # Add smoke test logic here
+        
+    - name: Deploy to production
+      if: success()
+      run: |
+        echo "Deploying to production environment..."
+        # Add production deployment logic here
+        
+  notify:
+    name: Notify
+    runs-on: ubuntu-latest
+    needs: [test, java-tests, python-tests, security, quality, coverage-summary, build, image-security, deploy]
+    if: always()
+
+    steps:
+    - name: Notify on success
+      if: ${{ needs.test.result == 'success' && needs.java-tests.result == 'success' && needs.python-tests.result == 'success' && needs.coverage-summary.result == 'success' && needs.security.result == 'success' && needs.quality.result == 'success' && needs.build.result == 'success' && needs.image-security.result == 'success' }}
+      run: |
+        echo "✅ All tests passed! 100% coverage achieved and quality checks successful."
+        echo "- Go tests: ✅"
+        echo "- Java tests (100% coverage): ✅"
+        echo "- Python tests (100% coverage): ✅"
+        echo "- Security scan: ✅"
+        echo "- Code quality: ✅"
+        echo "- Build: ✅"
+        echo "- Image security: ✅"
+        echo "  - Vulnerability scanning: ✅"
+        echo "  - SBOM generation: ✅"
+        echo "  - Image signing: ✅"
+        echo "  - License compliance: ✅"
+
+    - name: Notify on failure
+      if: ${{ needs.test.result == 'failure' || needs.java-tests.result == 'failure' || needs.python-tests.result == 'failure' || needs.security.result == 'failure' || needs.quality.result == 'failure' || needs.build.result == 'failure' || needs.coverage-summary.result == 'failure' || needs.image-security.result == 'failure' }}
+      run: |
+        echo "❌ Pipeline failed! Please check the logs."
+        echo "Test Results:"
+        echo "- Go tests: ${{ needs.test.result }}"
+        echo "- Java tests: ${{ needs.java-tests.result }}"
+        echo "- Python tests: ${{ needs.python-tests.result }}"
+        echo "- Coverage summary: ${{ needs.coverage-summary.result }}"
+        echo "- Security scan: ${{ needs.security.result }}"
+        echo "- Code quality: ${{ needs.quality.result }}"
+        echo "- Build: ${{ needs.build.result }}"
+        echo "- Image security: ${{ needs.image-security.result }}"
+        exit 1

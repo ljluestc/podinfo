@@ -74,6 +74,14 @@ func (w *Watcher) Watch() {
 	}()
 }
 
+// Close closes the underlying file system watcher
+func (w *Watcher) Close() error {
+	if w.fswatcher != nil {
+		return w.fswatcher.Close()
+	}
+	return nil
+}
+
 // updateCache reads files content and loads them into the cache
 func (w *Watcher) updateCache() error {
 	fileMap := make(map[string]string)

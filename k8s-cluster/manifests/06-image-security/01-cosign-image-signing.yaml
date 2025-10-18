@@ -1,0 +1,489 @@
+---
+# Cosign Image Signing and Verification
+# Sigstore Cosign provides keyless signing and verification of container images
+
+# Install policy-controller (admission controller for image verification):
+# kubectl apply -f https://github.com/sigstore/policy-controller/releases/latest/download/policy-controller.yaml
+
+---
+# Namespace for Cosign/Policy Controller
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cosign-system
+  labels:
+    name: cosign-system
+    pod-security.kubernetes.io/enforce: restricted
+
+---
+# Cosign Signing Keys Secret
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cosign-keys
+  namespace: cosign-system
+type: Opaque
+stringData:
+  # Generate with: cosign generate-key-pair
+  # Store private key securely (e.g., in HashiCorp Vault)
+  cosign.pub: |
+    -----BEGIN PUBLIC KEY-----
+    MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE8XHz8dF0q8VqpYQZxqyYEBpEW4zj
+    iy9pqEJUjEG2VqZmJMGVHuLIzL4qGpVGvEVZTq1KjqZXqE2VqZmJMGVHu==
+    -----END PUBLIC KEY-----
+
+---
+# ClusterImagePolicy for production images (keyless with Fulcio)
+apiVersion: policy.sigstore.dev/v1beta1
+kind: ClusterImagePolicy
+metadata:
+  name: require-signed-production-images
+spec:
+  images:
+  - glob: "harbor.example.com/production/**"
+  - glob: "gcr.io/my-production-project/**"
+  - glob: "registry.example.com/**"
+  authorities:
+  - keyless:
+      url: https://fulcio.sigstore.dev
+      identities:
+      - issuer: https://accounts.google.com
+        subject: ".*@example\\.com$"
+      - issuer: https://token.actions.githubusercontent.com
+        subjectRegExp: "^https://github.com/my-org/.*/.github/workflows/.*@refs/.*$"
+
+---
+# ClusterImagePolicy for development images (key-based)
+apiVersion: policy.sigstore.dev/v1beta1
+kind: ClusterImagePolicy
+metadata:
+  name: require-signed-dev-images
+spec:
+  images:
+  - glob: "harbor.example.com/dev/**"
+  - glob: "harbor.example.com/staging/**"
+  authorities:
+  - key:
+      secretRef:
+        name: cosign-keys
+        namespace: cosign-system
+  - keyless:
+      url: https://fulcio.sigstore.dev
+      identities:
+      - issuer: https://accounts.google.com
+        subject: ".*@example\\.com$"
+
+---
+# ClusterImagePolicy for Kubernetes system images (allow unsigned)
+apiVersion: policy.sigstore.dev/v1beta1
+kind: ClusterImagePolicy
+metadata:
+  name: allow-k8s-system-images
+spec:
+  images:
+  - glob: "registry.k8s.io/**"
+  - glob: "k8s.gcr.io/**"
+  - glob: "quay.io/coreos/**"
+  - glob: "docker.io/library/**"
+  authorities:
+  - static:
+      action: pass
+
+---
+# Policy-Controller Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: policy-controller-config
+  namespace: cosign-system
+data:
+  # Webhook configuration
+  webhook-config.yaml: |
+    apiVersion: v1
+    kind: Config
+    clusters:
+    - name: policy-controller
+      cluster:
+        server: https://policy-controller-webhook-service.cosign-system.svc
+        certificate-authority: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    users:
+    - name: policy-controller
+      user:
+        tokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+    contexts:
+    - name: policy-controller
+      context:
+        cluster: policy-controller
+        user: policy-controller
+    current-context: policy-controller
+
+  # Logging configuration
+  logging.yaml: |
+    level: info
+    development: false
+    outputPaths:
+    - stdout
+    errorOutputPaths:
+    - stderr
+
+---
+# ValidatingWebhookConfiguration for Policy Controller
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: policy-controller-webhook
+  labels:
+    app: policy-controller
+webhooks:
+- name: policy.sigstore.dev
+  admissionReviewVersions:
+  - v1
+  - v1beta1
+  clientConfig:
+    service:
+      name: policy-controller-webhook-service
+      namespace: cosign-system
+      path: /validate
+      port: 443
+    caBundle: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUN...  # Add actual CA bundle
+  rules:
+  - operations:
+    - CREATE
+    - UPDATE
+    apiGroups:
+    - ""
+    apiVersions:
+    - v1
+    resources:
+    - pods
+  - operations:
+    - CREATE
+    - UPDATE
+    apiGroups:
+    - apps
+    apiVersions:
+    - v1
+    resources:
+    - deployments
+    - replicasets
+    - statefulsets
+    - daemonsets
+  - operations:
+    - CREATE
+    - UPDATE
+    apiGroups:
+    - batch
+    apiVersions:
+    - v1
+    resources:
+    - jobs
+    - cronjobs
+  failurePolicy: Fail
+  matchPolicy: Equivalent
+  namespaceSelector:
+    matchExpressions:
+    - key: policy.sigstore.dev/include
+      operator: In
+      values:
+      - "true"
+    # Exclude system namespaces
+    - key: kubernetes.io/metadata.name
+      operator: NotIn
+      values:
+      - kube-system
+      - kube-public
+      - kube-node-lease
+      - cosign-system
+      - harbor-system
+  objectSelector: {}
+  sideEffects: None
+  timeoutSeconds: 10
+
+---
+# ServiceAccount for Policy Controller
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: policy-controller
+  namespace: cosign-system
+automountServiceAccountToken: true
+
+---
+# ClusterRole for Policy Controller
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: policy-controller-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  - secrets
+  - configmaps
+  - serviceaccounts
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  - replicasets
+  - statefulsets
+  - daemonsets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  - cronjobs
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - policy.sigstore.dev
+  resources:
+  - clusterimagepolicies
+  - imagepolicies
+  verbs:
+  - get
+  - list
+  - watch
+
+---
+# ClusterRoleBinding for Policy Controller
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: policy-controller-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: policy-controller-role
+subjects:
+- kind: ServiceAccount
+  name: policy-controller
+  namespace: cosign-system
+
+---
+# Cosign Signing Job (for CI/CD)
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cosign-sign-image
+  namespace: cosign-system
+spec:
+  template:
+    metadata:
+      labels:
+        app: cosign-signer
+    spec:
+      serviceAccountName: policy-controller
+      restartPolicy: Never
+      containers:
+      - name: cosign
+        image: gcr.io/projectsigstore/cosign:v2.2.0
+        command:
+        - sh
+        - -c
+        - |
+          # Example: Sign an image
+          # This should be run in CI/CD pipeline after image build
+
+          IMAGE=${IMAGE:-harbor.example.com/production/myapp:latest}
+
+          echo "Signing image: $IMAGE"
+
+          # Option 1: Keyless signing (recommended for CI/CD with OIDC)
+          if [ -n "$COSIGN_EXPERIMENTAL" ]; then
+            cosign sign --yes $IMAGE
+          fi
+
+          # Option 2: Key-based signing
+          if [ -f /secrets/cosign.key ]; then
+            cosign sign --key /secrets/cosign.key --yes $IMAGE
+          fi
+
+          # Verify signature
+          cosign verify $IMAGE
+
+          echo "Image signed successfully!"
+        env:
+        - name: IMAGE
+          value: "harbor.example.com/production/myapp:latest"
+        - name: COSIGN_EXPERIMENTAL
+          value: "1"  # Enable keyless signing
+        volumeMounts:
+        - name: cosign-keys
+          mountPath: /secrets
+          readOnly: true
+      volumes:
+      - name: cosign-keys
+        secret:
+          secretName: cosign-keys
+          optional: true
+
+---
+# ConfigMap for Cosign scripts
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cosign-scripts
+  namespace: cosign-system
+data:
+  sign-image.sh: |
+    #!/bin/bash
+    set -euo pipefail
+
+    IMAGE="$1"
+
+    if [ -z "$IMAGE" ]; then
+      echo "Usage: $0 <image>"
+      exit 1
+    fi
+
+    echo "Signing image: $IMAGE"
+
+    # Check if running in CI/CD with OIDC token
+    if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+      echo "Using keyless signing with GitHub Actions OIDC"
+      cosign sign --yes "$IMAGE"
+    elif [ -f /secrets/cosign.key ]; then
+      echo "Using key-based signing"
+      cosign sign --key /secrets/cosign.key --yes "$IMAGE"
+    else
+      echo "Error: No signing method available"
+      exit 1
+    fi
+
+    echo "Image signed successfully!"
+
+  verify-image.sh: |
+    #!/bin/bash
+    set -euo pipefail
+
+    IMAGE="$1"
+
+    if [ -z "$IMAGE" ]; then
+      echo "Usage: $0 <image>"
+      exit 1
+    fi
+
+    echo "Verifying image: $IMAGE"
+
+    # Try keyless verification first
+    if cosign verify "$IMAGE" 2>/dev/null; then
+      echo "Image verified with keyless signature"
+      exit 0
+    fi
+
+    # Try key-based verification
+    if [ -f /secrets/cosign.pub ]; then
+      if cosign verify --key /secrets/cosign.pub "$IMAGE" 2>/dev/null; then
+        echo "Image verified with key-based signature"
+        exit 0
+      fi
+    fi
+
+    echo "Image verification failed"
+    exit 1
+
+  generate-attestation.sh: |
+    #!/bin/bash
+    set -euo pipefail
+
+    IMAGE="$1"
+    PREDICATE_TYPE="${2:-https://slsa.dev/provenance/v0.2}"
+
+    if [ -z "$IMAGE" ]; then
+      echo "Usage: $0 <image> [predicate-type]"
+      exit 1
+    fi
+
+    # Generate SLSA provenance attestation
+    cat > /tmp/predicate.json <<EOF
+    {
+      "builder": {
+        "id": "https://github.com/my-org/my-repo/.github/workflows/build.yml@refs/heads/main"
+      },
+      "buildType": "https://github.com/my-org/my-build-type",
+      "invocation": {
+        "configSource": {
+          "uri": "git+https://github.com/my-org/my-repo@refs/heads/main",
+          "digest": {
+            "sha1": "$(git rev-parse HEAD)"
+          }
+        }
+      },
+      "metadata": {
+        "buildStartedOn": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+        "buildFinishedOn": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+        "completeness": {
+          "arguments": true,
+          "environment": false,
+          "materials": true
+        }
+      },
+      "materials": []
+    }
+    EOF
+
+    # Attach attestation to image
+    cosign attest --predicate /tmp/predicate.json \
+      --type "$PREDICATE_TYPE" \
+      --yes "$IMAGE"
+
+    echo "Attestation attached to image: $IMAGE"
+
+---
+# NetworkPolicy for Cosign system
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cosign-network-policy
+  namespace: cosign-system
+spec:
+  podSelector:
+    matchLabels:
+      app: policy-controller
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector: {}
+    ports:
+    - protocol: TCP
+      port: 443
+  egress:
+  # Allow access to Sigstore services
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 80
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
+  # Allow access to container registries
+  - to:
+    - podSelector:
+        matchLabels:
+          app: harbor
+      namespaceSelector:
+        matchLabels:
+          name: harbor-system
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 5000

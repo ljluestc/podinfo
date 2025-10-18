@@ -1,0 +1,59 @@
+codecov:
+  require_ci_to_pass: yes
+  notify:
+    wait_for_ci: yes
+
+coverage:
+  precision: 2
+  round: down
+  range: "90...100"
+
+  status:
+    project:
+      default:
+        target: 100%
+        threshold: 0%
+        if_ci_failed: error
+
+    patch:
+      default:
+        target: 100%
+        threshold: 0%
+
+flags:
+  go:
+    paths:
+      - pkg/
+      - cmd/
+    carryforward: false
+
+  java:
+    paths:
+      - src/main/java/
+    carryforward: false
+
+  python:
+    paths:
+      - "*.py"
+      - test_*.py
+    carryforward: false
+
+  combined:
+    carryforward: false
+
+comment:
+  layout: "header, diff, flags, files"
+  behavior: default
+  require_changes: false
+  require_base: false
+  require_head: yes
+
+ignore:
+  - "**/*_test.go"
+  - "**/test_*.py"
+  - "**/*Test.java"
+  - "**/docs/**"
+  - "**/*.md"
+  - "**/examples/**"
+  - "**/vendor/**"
+  - "**/go/src/**"
