@@ -12,6 +12,7 @@ permissions:
 env:
   KUBERNETES_VERSION: 1.31.0
   HELM_VERSION: 3.17.3
+  KYVERNO_VERSION: 1.13.2
 
 jobs:
   test:
@@ -65,6 +66,37 @@ jobs:
         run: |
           timoni mod lint . 
           timoni build podinfo . -f test_values.cue | kubeconform -strict -summary -skip=ServiceMonitor -kubernetes-version ${{ env.KUBERNETES_VERSION }}
+      - name: Setup Kyverno CLI
+        run: |
+          set -euo pipefail
+          curl -L "https://github.com/kyverno/kyverno/releases/download/v${{ env.KYVERNO_VERSION }}/kyverno-cli_v${{ env.KYVERNO_VERSION }}_linux_x86_64.tar.gz" -o kyverno.tar.gz
+          tar -xzf kyverno.tar.gz kyverno
+          sudo mv kyverno /usr/local/bin/kyverno
+          kyverno version
+      - name: Validate Kubernetes manifests with Kyverno (PSS Restricted)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/kyverno/manifests
+          # Render manifests from all supported installers
+          helm template ./charts/podinfo/ > /tmp/kyverno/manifests/helm.yaml
+          kubectl kustomize ./kustomize/ > /tmp/kyverno/manifests/kustomize.yaml
+          timoni build podinfo ./timoni/podinfo -f ./timoni/podinfo/test_values.cue > /tmp/kyverno/manifests/timoni.yaml
+
+          # Fetch Kyverno community policies (PSS)
+          git clone --depth 1 https://github.com/kyverno/policies /tmp/kyverno/policies
+
+          echo "Running Kyverno PSS (restricted) validation..."
+          kyverno apply /tmp/kyverno/policies/pod-security/restricted \
+            --resource /tmp/kyverno/manifests/helm.yaml \
+            --resource /tmp/kyverno/manifests/kustomize.yaml \
+            --resource /tmp/kyverno/manifests/timoni.yaml
+      - name: Kyverno self-test (one should fail, one should pass)
+        run: |
+          set -euo pipefail
+          echo "Expecting failure for test/pod-failing.yaml ..."
+          kyverno apply /tmp/kyverno/policies/pod-security/restricted --resource test/pod-failing.yaml && { echo "Expected failure but validation passed"; exit 1; } || echo "Got expected failure"
+          echo "Expecting pass for test/pod-passing.yaml ..."
+          kyverno apply /tmp/kyverno/policies/pod-security/restricted --resource test/pod-passing.yaml
       - name: Check if working tree is dirty
         run: |
           if [[ $(git diff --stat) != '' ]]; then

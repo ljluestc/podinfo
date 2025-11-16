@@ -20,6 +20,7 @@ help:
 	@echo "  install-tools       - Install required tools"
 	@echo "  pre-commit          - Run pre-commit checks"
 	@echo "  ci-cd               - Run full CI/CD pipeline"
+	@echo "  kyverno-validate    - Validate rendered manifests with Kyverno PSS policies"
 
 # Test targets
 test: test-unit test-integration test-comprehensive test-java
@@ -189,6 +190,74 @@ docs:
 quality: format lint security test coverage-html
 	@echo "✅ All quality checks completed!"
 
+# Validate Kubernetes manifests against Kyverno Pod Security Standards (restricted)
+kyverno-validate:
+	@echo "🔒 Validating manifests with Kyverno (PSS Restricted)..."
+	@if ! command -v kyverno >/dev/null 2>&1; then \
+		echo "Kyverno CLI not found. Install from https://github.com/kyverno/kyverno/releases or via package manager."; \
+		exit 1; \
+	fi
+	@mkdir -p /tmp/kyverno/manifests
+	@echo "Rendering Helm chart..."
+	@helm template ./charts/podinfo/ > /tmp/kyverno/manifests/helm.yaml
+	@echo "Rendering Kustomize overlay..."
+	@kubectl kustomize ./kustomize/ > /tmp/kyverno/manifests/kustomize.yaml
+	@echo "Rendering Timoni module (if available)..."
+	@if command -v timoni >/dev/null 2>&1; then \
+		timoni build podinfo ./timoni/podinfo -f ./timoni/podinfo/test_values.cue > /tmp/kyverno/manifests/timoni.yaml; \
+	else \
+		echo "Timoni not found, skipping Timoni render."; \
+	fi
+	@echo "Fetching Kyverno community policies (PSS)..."
+	@rm -rf /tmp/kyverno/policies; \
+	git clone --depth 1 https://github.com/kyverno/policies /tmp/kyverno/policies >/dev/null 2>&1 || true; \
+	if [ ! -d /tmp/kyverno/policies ]; then \
+		if [ -d /tmp/kyverno-policies ]; then \
+			echo "Using existing policies cache at /tmp/kyverno-policies (offline)."; \
+			ln -sfn /tmp/kyverno-policies /tmp/kyverno/policies; \
+		else \
+			echo "Failed to fetch Kyverno policies and no local cache found. Connect to the Internet or clone kyverno/policies to /tmp/kyverno-policies"; \
+			exit 1; \
+		fi \
+	fi
+	@echo "Assembling resources..."
+	@RES_ARGS=""; \
+	for f in /tmp/kyverno/manifests/helm.yaml /tmp/kyverno/manifests/kustomize.yaml /tmp/kyverno/manifests/timoni.yaml; do \
+		[ -s $$f ] && RES_ARGS="$$RES_ARGS --resource $$f"; \
+	done; \
+	if [ -z "$$RES_ARGS" ]; then \
+		echo "No rendered manifests found to validate."; \
+		exit 1; \
+	fi; \
+	echo "Running Kyverno PSS (restricted) validation..."; \
+	set -x; \
+	kyverno apply /tmp/kyverno/policies/pod-security/restricted $$RES_ARGS
+	@echo "✅ Kyverno validation passed"
+
+# Run Kyverno self-test with bundled sample manifests (one should fail, one should pass)
+kyverno-selftest:
+	@echo "🧪 Running Kyverno self-test with sample manifests..."
+	@if ! command -v kyverno >/dev/null 2>&1; then \
+		echo "Kyverno CLI not found. Install from https://github.com/kyverno/kyverno/releases or via package manager."; \
+		exit 1; \
+	fi
+	@if [ ! -d /tmp/kyverno/policies ]; then \
+		echo "Fetching Kyverno community policies (PSS)..."; \
+		git clone --depth 1 https://github.com/kyverno/policies /tmp/kyverno/policies >/dev/null 2>&1 || true; \
+		if [ ! -d /tmp/kyverno/policies ] && [ -d /tmp/kyverno-policies ]; then \
+			ln -sfn /tmp/kyverno-policies /tmp/kyverno/policies; \
+			echo "Using existing policies cache at /tmp/kyverno-policies (offline)."; \
+		fi; \
+		if [ ! -d /tmp/kyverno/policies ]; then \
+			echo "Failed to fetch policies. Connect to the Internet or clone kyverno/policies to /tmp/kyverno-policies"; \
+			exit 1; \
+		fi; \
+	fi
+	@echo "Expecting failure for test/pod-failing.yaml ..."
+	@kyverno apply /tmp/kyverno/policies/pod-security/restricted --resource test/pod-failing.yaml && { echo "❌ Expected failure but passed"; exit 1; } || echo "✅ Got expected failure"
+	@echo "Expecting pass for test/pod-passing.yaml ..."
+	@kyverno apply /tmp/kyverno/policies/pod-security/restricted --resource test/pod-passing.yaml
+	@echo "✅ Kyverno self-test passed"
 # Continuous testing (watch mode)
 watch:
 	@echo "👀 Watching for changes..."

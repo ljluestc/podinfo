@@ -210,3 +210,13 @@ flux -n default delete helmrelease podinfo
 If you wish to manage the lifecycle of your applications in a **GitOps** manner, check out
 this [workflow example](https://github.com/fluxcd/flux2-kustomize-helm-example)
 for multi-env deployments with Flux, Kustomize and Helm.
+
+### Policy validation with Kyverno (PSS)
+
+Validate the rendered Kubernetes manifests against Kyverno Pod Security Standards (restricted):
+
+```bash
+# Install Kyverno CLI (see https://github.com/kyverno/kyverno/releases)
+# Then run:
+make kyverno-validate
+```
